@@ -2,8 +2,6 @@ module github.com/zero-day-ai/setec
 
 go 1.25.3
 
-toolchain go1.25.9
-
 require (
 	github.com/containerd/containerd/v2 v2.2.3
 	github.com/containerd/errdefs v1.0.0
