@@ -24,10 +24,11 @@ help: ## List targets.
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: up
-up: ## Full bring-up of k3s + kata + Setec on this host.
+up: ## Full bring-up of k3s + kata + devmapper + Setec on this host.
 	$(SCRIPTS)/00-preflight.sh
 	$(SCRIPTS)/10-install-k3s.sh
 	$(SCRIPTS)/20-install-kata.sh
+	$(SCRIPTS)/25-install-devmapper.sh
 	$(SCRIPTS)/30-generate-pki.sh
 	$(SCRIPTS)/40-install-setec.sh
 
