@@ -29,14 +29,15 @@ trap dump_diagnostics ERR
 
 green "Dialling Setec at ${ADDR} as tenant gibson-dev (CN of client cert)"
 LOG=$(mktemp)
+# ai-code-exec reads the Python source to execute from stdin (runs it as
+# `python3 -c <stdin>`). Pipe the test snippet in; no --command flag exists.
 ( cd "${SETEC_REPO_ROOT}/examples/ai-code-exec" && \
-  go run . \
+  echo 'print("hello from microvm")' | go run . \
     --addr="${ADDR}" \
     --client-cert="${PKI}/client.crt" \
     --client-key="${PKI}/client.key" \
     --ca="${PKI}/ca.crt" \
-    --image=python:3.12-slim \
-    --command='python3 -c "print(\"hello from microvm\")"' ) | tee "${LOG}"
+    --image=docker.io/library/python:3.12-slim ) | tee "${LOG}"
 
 if grep -q 'hello from microvm' "${LOG}"; then
     green "PASS: Setec smoke — sandbox printed expected output"
