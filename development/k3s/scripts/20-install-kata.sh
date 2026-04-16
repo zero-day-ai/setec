@@ -40,6 +40,48 @@ fi
     exit 1
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# kata-deploy 3.28+ requires k3s's rendered /var/lib/rancher/k3s/agent/etc/
+# containerd/config.toml to import the drop-in directory config.toml.d so
+# kata-deploy can drop its runtime handler fragments there at install time.
+# k3s regenerates config.toml from a Go template on every restart, so the
+# fix is to provide a config.toml.tmpl that adds the import before handing
+# off to k3s's "base" template. Idempotent: only writes the template if
+# it's missing or different; only restarts k3s if we changed the template.
+# ─────────────────────────────────────────────────────────────────────────
+K3S_CONTAINERD_DIR=/var/lib/rancher/k3s/agent/etc/containerd
+K3S_TMPL="${K3S_CONTAINERD_DIR}/config.toml.tmpl"
+DESIRED_TMPL=$(cat <<'EOF'
+# Managed by opensource/setec/development/k3s/scripts/20-install-kata.sh.
+# Adds the drop-in import that kata-deploy (3.28+) requires, then falls
+# through to k3s's built-in containerd config template.
+imports = ["/var/lib/rancher/k3s/agent/etc/containerd/config.toml.d/*.toml"]
+
+{{ template "base" . }}
+EOF
+)
+
+tmpl_changed=0
+if ! sudo test -f "${K3S_TMPL}" || ! echo "${DESIRED_TMPL}" | sudo cmp -s - "${K3S_TMPL}"; then
+    green "Writing k3s containerd config template at ${K3S_TMPL}"
+    sudo mkdir -p "${K3S_CONTAINERD_DIR}"
+    echo "${DESIRED_TMPL}" | sudo tee "${K3S_TMPL}" >/dev/null
+    tmpl_changed=1
+fi
+
+if [[ ${tmpl_changed} -eq 1 ]]; then
+    green "Restarting k3s so it regenerates containerd/config.toml with the drop-in import"
+    sudo systemctl restart k3s
+    deadline=$(( $(date +%s) + 60 ))
+    while ! kubectl get nodes 2>/dev/null | grep -q ' Ready '; do
+        [[ $(date +%s) -gt $deadline ]] && { red "FAIL: k3s did not return to Ready within 60s after restart"; exit 1; }
+        sleep 2
+    done
+    # Force any stuck kata-deploy pods from a prior run to re-roll against
+    # the new containerd config.
+    kubectl -n kube-system delete pods -l name=kata-deploy --ignore-not-found=true --wait=false 2>/dev/null || true
+fi
+
 # The kata-deploy chart depends on node-feature-discovery. helm dependency
 # build requires the subchart's source repo to be registered first.
 if ! helm repo list 2>/dev/null | awk '{print $2}' | grep -q '^https://kubernetes-sigs.github.io/node-feature-discovery/charts$'; then
