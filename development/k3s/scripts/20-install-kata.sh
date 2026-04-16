@@ -40,8 +40,14 @@ fi
     exit 1
 }
 
-# The kata-deploy chart depends on node-feature-discovery; fetch into charts/.
-# Idempotent — a no-op if charts/ is already populated and up-to-date.
+# The kata-deploy chart depends on node-feature-discovery. helm dependency
+# build requires the subchart's source repo to be registered first.
+if ! helm repo list 2>/dev/null | awk '{print $2}' | grep -q '^https://kubernetes-sigs.github.io/node-feature-discovery/charts$'; then
+    green "Registering node-feature-discovery helm repo"
+    helm repo add nfd https://kubernetes-sigs.github.io/node-feature-discovery/charts
+fi
+helm repo update nfd >/dev/null 2>&1 || true
+
 green "helm dependency build (fetches node-feature-discovery subchart)"
 helm dependency build "${CHART_PATH}"
 
