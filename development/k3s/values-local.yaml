@@ -13,6 +13,10 @@ image:
   tag: "0.0.1"
 
 frontend:
+  # The chart defaults frontend.enabled to false (production deployments
+  # may run the operator without exposing a gRPC API). Dev always wants
+  # the frontend — it's the Setec product surface.
+  enabled: true
   image:
     tag: "0.0.1"
   # Dev TLS material delivered via Secrets created by 40-install-setec.sh
