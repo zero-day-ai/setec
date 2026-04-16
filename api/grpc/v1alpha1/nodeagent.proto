@@ -1,0 +1,175 @@
+// Copyright 2026 The Setec Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+
+syntax = "proto3";
+
+package setec.v1alpha1;
+
+import "api/grpc/v1alpha1/sandbox.proto";
+
+option go_package = "github.com/zero-day-ai/setec/api/grpc/v1alpha1;setecv1alpha1grpc";
+
+// NodeAgentService is the internal gRPC surface the Setec operator
+// calls on each node-agent DaemonSet pod to drive snapshot, restore,
+// pause, and resume operations synchronously. It is NEVER exposed
+// outside the cluster; authentication is mTLS with a shared CA
+// provisioned at chart install time.
+service NodeAgentService {
+  // CreateSnapshot pauses the target microVM, persists its state
+  // (CPU + memory) via the configured storage backend, and returns
+  // the resulting storage reference and digest. The node-agent
+  // resumes the VM locally unless the caller sends a subsequent
+  // PauseSandbox (the Coordinator decides based on
+  // Sandbox.spec.snapshot.afterCreate).
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+  // RestoreSandbox loads a previously-persisted snapshot into a new
+  // Firecracker microVM attached to the caller-provided Kata socket.
+  // Called after the Pod has been scheduled and Kata has set up the
+  // surrounding sandbox container.
+  rpc RestoreSandbox(RestoreSandboxRequest) returns (RestoreSandboxResponse);
+
+  // PauseSandbox issues the Firecracker PATCH /vm state=Paused call
+  // against the target microVM without persisting state.
+  rpc PauseSandbox(PauseSandboxRequest) returns (PauseSandboxResponse);
+
+  // ResumeSandbox is the inverse of PauseSandbox.
+  rpc ResumeSandbox(ResumeSandboxRequest) returns (ResumeSandboxResponse);
+
+  // QueryPool returns the current set of pre-warmed pool entries the
+  // node has available for the given SandboxClass. The operator uses
+  // this to pick a pool-hosting node at scheduling time. Empty result
+  // means the operator falls back to cold boot.
+  rpc QueryPool(QueryPoolRequest) returns (QueryPoolResponse);
+
+  // DeleteSnapshot securely erases the persisted state files and
+  // returns success. Called by the SnapshotReconciler when a
+  // Snapshot CR is being deleted (TTL elapsed, user kubectl
+  // delete, or namespace teardown).
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+}
+
+// CreateSnapshotRequest identifies the sandbox to snapshot and where
+// the resulting state should be written.
+message CreateSnapshotRequest {
+  // sandbox_id is the composite <namespace>/<name>/<uid> tuple used
+  // elsewhere in the Setec API. Present primarily for observability;
+  // the node-agent's actual dispatch key is source_kata_socket.
+  string sandbox_id = 1;
+
+  // snapshot_id is the opaque identifier the storage backend uses to
+  // namespace the persisted state files (e.g. the Snapshot CR's
+  // namespace/name, or a UUID). Guaranteed unique per snapshot.
+  string snapshot_id = 2;
+
+  // storage_backend names the StorageBackend implementation to route
+  // to. Phase 3 ships only "local-disk".
+  string storage_backend = 3;
+
+  // source_kata_socket is the absolute path to the Firecracker API
+  // socket Kata has exposed for the source microVM, usually under
+  // /run/kata-containers/<sandbox-id>/firecracker.socket. The
+  // operator resolves the placeholder and passes the concrete path.
+  string source_kata_socket = 4;
+}
+
+// CreateSnapshotResponse carries the backend ref for the persisted
+// state plus integrity metadata the operator writes into the Snapshot
+// CR.
+message CreateSnapshotResponse {
+  string storage_ref = 1;
+  int64 size_bytes = 2;
+  string sha256 = 3;
+}
+
+// RestoreSandboxRequest identifies a snapshot to load into a fresh
+// Firecracker VM attached to the caller-provided Kata socket.
+message RestoreSandboxRequest {
+  string snapshot_id = 1;
+  string storage_ref = 2;
+  string storage_backend = 3;
+
+  // kata_socket_target is the Firecracker API socket the target Pod's
+  // Kata sandbox has exposed. The node-agent speaks to this socket to
+  // instantiate the restored VM.
+  string kata_socket_target = 4;
+
+  // resources optionally overrides the VM resource shape during
+  // restore. When zero-valued the shape baked into the snapshot is
+  // used as-is.
+  Resources resources = 5;
+}
+
+// RestoreSandboxResponse reports success/failure of the restore.
+message RestoreSandboxResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// PauseSandboxRequest / PauseSandboxResponse wrap a direct
+// Firecracker PATCH /vm state=Paused.
+message PauseSandboxRequest {
+  string sandbox_id = 1;
+  string kata_socket_target = 2;
+}
+
+message PauseSandboxResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// ResumeSandboxRequest / ResumeSandboxResponse wrap the resume
+// counterpart.
+message ResumeSandboxRequest {
+  string sandbox_id = 1;
+  string kata_socket_target = 2;
+}
+
+message ResumeSandboxResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// QueryPoolRequest asks the node-agent to report pre-warm pool entries
+// compatible with the given class (optionally filtered by image).
+message QueryPoolRequest {
+  string sandbox_class = 1;
+
+  // image_ref, when set, restricts the response to entries whose
+  // underlying image matches. Empty means any image for the class.
+  string image_ref = 2;
+}
+
+// QueryPoolResponse enumerates the pool entries currently available on
+// the node. The operator treats the list as a snapshot — an entry
+// reported here may still race to Claim with another operator.
+message QueryPoolResponse {
+  repeated PoolEntry entries = 1;
+}
+
+// PoolEntry is a single paused microVM the node has ready for an
+// on-demand restore.
+message PoolEntry {
+  string entry_id = 1;
+  string image_ref = 2;
+  bool available = 3;
+  int64 age_seconds = 4;
+}
+
+// DeleteSnapshotRequest / DeleteSnapshotResponse wrap a
+// Storage.Delete call on the node.
+message DeleteSnapshotRequest {
+  string snapshot_id = 1;
+  string storage_ref = 2;
+  string storage_backend = 3;
+}
+
+message DeleteSnapshotResponse {
+  bool success = 1;
+  string error = 2;
+}

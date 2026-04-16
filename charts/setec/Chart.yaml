@@ -1,0 +1,24 @@
+apiVersion: v2
+name: setec
+description: |
+  Setec is a Kubernetes-native operator that orchestrates Firecracker microVMs
+  via Kata Containers, exposing a high-level Sandbox custom resource for
+  ephemeral, isolated workload execution.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/zero-day-ai/setec
+sources:
+  - https://github.com/zero-day-ai/setec
+icon: https://raw.githubusercontent.com/zero-day-ai/setec/main/docs/assets/logo-128.png
+keywords:
+  - microvm
+  - firecracker
+  - kata
+  - sandbox
+  - isolation
+  - operator
+maintainers:
+  - name: The Setec Authors
+    url: https://github.com/zero-day-ai/setec

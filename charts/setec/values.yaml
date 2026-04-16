@@ -1,0 +1,285 @@
+# -- Container image for the Setec operator.
+image:
+  # -- Image repository. Override to pull from a private mirror.
+  repository: ghcr.io/zero-day-ai/setec
+  # -- Image tag. Defaults to the chart's appVersion when left empty.
+  tag: "0.1.0"
+  # -- Image pull policy. One of Always, Never, IfNotPresent.
+  pullPolicy: IfNotPresent
+
+# -- imagePullSecrets is a list of Secret references the Pod uses when pulling
+# the operator image from a private registry. Leave empty for public images.
+imagePullSecrets: []
+
+# -- nameOverride replaces the chart name used in resource names, keeping the
+# release-name prefix. Use fullnameOverride for a full replacement.
+nameOverride: ""
+
+# -- fullnameOverride replaces the full resource name prefix entirely. When set
+# it bypasses both the chart name and the release name in generated objects.
+fullnameOverride: ""
+
+# -- createNamespace toggles chart-managed creation of the target namespace.
+# Leave false when managing namespaces out of band (e.g. `helm install
+# --create-namespace`). When true, a Namespace object is templated with the
+# name set by .Values.namespace.
+createNamespace: false
+
+# -- namespace is the namespace the Deployment and ServiceAccount are rendered
+# into. The chart does not currently pin cluster-scoped resources to this
+# namespace (ClusterRole/ClusterRoleBinding are global by nature), but the
+# RoleBinding subjects reference this namespace.
+namespace: setec-system
+
+# -- replicas is the number of controller-manager Pods. Default is 1 because
+# the operator runs a single leader. Set to 2+ and enable leaderElect to get
+# HA with only one active reconciler at a time.
+replicas: 1
+
+# -- resources describes the Pod's CPU and memory requests and limits. The
+# defaults are sized for a small controller-manager; tune upward only if
+# metrics show sustained throttling or OOM.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- runtimeClassName is the name of the Kata RuntimeClass the operator will
+# attach to every Sandbox Pod it creates. Must match the RuntimeClass
+# installed by kata-deploy on your cluster. Default `kata-fc` selects the
+# Firecracker VMM configuration.
+runtimeClassName: kata-fc
+
+# -- nodeSelectorLabel is the Node label key the startup prerequisite check
+# uses to determine whether any Kata-capable Nodes exist. Informational only;
+# actual scheduling uses the RuntimeClass.
+nodeSelectorLabel: katacontainers.io/kata-runtime
+
+# -- leaderElect enables controller-runtime leader election. Required when
+# running more than one replica; safe to leave false for the default single
+# replica deployment.
+leaderElect: false
+
+# -- metricsPort is the TCP port the operator serves Prometheus metrics on.
+# The /metrics endpoint is exposed on this port.
+metricsPort: 8080
+
+# -- healthPort is the TCP port the operator serves /healthz and /readyz on.
+# The Helm-templated liveness and readiness probes target this port.
+healthPort: 8081
+
+# -- serviceAccount controls ServiceAccount creation and naming. When
+# create is true the chart renders a ServiceAccount named `{fullname}` (or
+# the value of .name, if set). When false the operator uses an existing SA
+# whose name is given by .name.
+serviceAccount:
+  create: true
+  name: ""
+
+# -- podSecurityContext is applied at the Pod level. Enforces the secure
+# defaults required by NFR Security: runs as a non-root user and uses the
+# RuntimeDefault seccomp profile so the kernel syscall surface matches the
+# container runtime's baseline.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- containerSecurityContext is applied at the container level. Drops every
+# Linux capability, forbids privilege escalation, and runs on a read-only
+# root filesystem. The distroless base image has no shell or package manager
+# so these restrictions do not limit operation.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  capabilities:
+    drop:
+      - ALL
+
+# -- nodeSelector constrains the operator Pod to Nodes matching these labels.
+# The operator itself does not need Kata-capable Nodes, so leave empty unless
+# you need to pin it.
+nodeSelector: {}
+
+# -- tolerations allow the operator Pod to schedule onto tainted Nodes. The
+# operator is stateless and usually belongs on control-plane or general Nodes,
+# not on the Kata workload Nodes.
+tolerations: []
+
+# -- affinity controls Pod affinity and anti-affinity. Use this to spread
+# multiple replicas across Nodes when leaderElect is enabled.
+affinity: {}
+
+# ---------------------------------------------------------------------------
+# Phase 2: multi-tenancy, observability, webhook, node-agent, frontend.
+# Every block below is OFF by default — a helm install with no overrides
+# behaves identically to Phase 1. Opt in one feature at a time.
+# ---------------------------------------------------------------------------
+
+# -- multiTenancy enables per-namespace tenant-label enforcement. When on,
+# Sandboxes in a namespace without the configured tenant label are
+# rejected (Event + Pending status).
+multiTenancy:
+  enabled: false
+  # tenantLabelKey is the label key checked on the namespace.
+  tenantLabelKey: setec.zero-day.ai/tenant
+
+# -- observability controls OpenTelemetry tracing and Prometheus scraping
+# options.
+observability:
+  enabled: false
+  # otlpEndpoint is the gRPC OTLP collector address (e.g.
+  # "otel-collector.monitoring.svc:4317"). Empty disables tracing.
+  otlpEndpoint: ""
+  # metricsEnabled leaves /metrics exposed even when tracing is off.
+  metricsEnabled: true
+  # otelTLS configures the OTLP exporter's transport. Default is TLS
+  # using the pod's system root CAs; set caSecretName to inject a
+  # private CA bundle. Setting enabled: false falls back to plaintext
+  # export — NEVER do this in production; the operator emits a loud
+  # warning on startup.
+  otelTLS:
+    enabled: true
+    # caSecretName is the name of a Secret containing a single
+    # `ca.crt` key. When set the operator mounts it at
+    # /etc/setec/otel-ca and passes --otel-ca-file. Empty uses system
+    # root CAs.
+    caSecretName: ""
+
+# -- webhook installs the ValidatingWebhookConfiguration + Service that
+# route admission requests to the operator's built-in webhook server.
+webhook:
+  enabled: false
+  # failurePolicy is propagated to the ValidatingWebhookConfiguration.
+  failurePolicy: Fail
+  # certManager integration optionally issues/rotates the webhook TLS
+  # cert. When disabled, an administrator must mount a Secret at
+  # /tmp/k8s-webhook-server/serving-certs.
+  certManager:
+    enabled: false
+    issuerRef:
+      kind: ClusterIssuer
+      name: selfsigned
+
+# -- nodeAgent installs the DaemonSet that manages the devicemapper
+# thin-pool, samples fill state, and exposes node-level Prometheus
+# metrics.
+nodeAgent:
+  enabled: false
+  image:
+    repository: ghcr.io/zero-day-ai/setec-node-agent
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  # Kata-runtime node selector. Must match the label the cluster admin
+  # applies to KVM-capable nodes.
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"
+  thinpoolDataDevice: ""
+  thinpoolMetadataDevice: ""
+  fillThreshold: 80
+  # prefetchImages is a space-separated list of OCI references the
+  # agent pulls into the containerd content store on startup.
+  prefetchImages: ""
+  # resources for the node-agent container. Under-provisioned by
+  # design; the agent is near-idle between samples.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# -- frontend installs the gRPC SandboxService Deployment.
+frontend:
+  enabled: false
+  image:
+    repository: ghcr.io/zero-day-ai/setec-frontend
+    tag: "0.2.0"
+    pullPolicy: IfNotPresent
+  # listenAddr is the gRPC bind address inside the Pod.
+  listenAddr: ":50051"
+  # servicePort is the ClusterIP service port.
+  servicePort: 50051
+  # metricsPort is the HTTP Prometheus port.
+  metricsPort: 9091
+  # tlsCertSecretName is the name of the Secret holding server.crt/server.key.
+  # REQUIRED when frontend.enabled=true — mTLS is mandatory for the
+  # gRPC frontend.
+  tlsCertSecretName: ""
+  # tlsClientCASecretName is a Secret holding ca.crt for client-cert
+  # verification. REQUIRED when frontend.enabled=true — mTLS is the
+  # only supported authentication mechanism.
+  tlsClientCASecretName: ""
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# -- defaultClass optionally templates a cluster-default SandboxClass so
+# tenant Sandboxes without a class name resolve to a sane baseline.
+defaultClass:
+  enabled: false
+  name: default
+  spec:
+    vmm: firecracker
+    runtimeClassName: kata-fc
+    maxResources:
+      vcpu: 8
+      memory: 16Gi
+    default: true
+
+# ---------------------------------------------------------------------------
+# Phase 3: snapshot, restore, pause/resume, pre-warmed pool.
+# Every block below is OFF by default; a helm install with no overrides
+# renders Phase 2-equivalent manifests.
+# ---------------------------------------------------------------------------
+
+# -- snapshots is the Phase 3 master kill-switch. When false the manager
+# binary is invoked without --snapshots-enabled, the Snapshot CRD
+# controller does not run, and the SandboxReconciler falls back to
+# Phase 2 semantics.
+snapshots:
+  enabled: false
+  # backend selects the snapshot storage backend. Only "local-disk" ships
+  # in Phase 3.
+  backend: local-disk
+  # localDisk holds the backend-specific configuration the node-agent
+  # consumes.
+  localDisk:
+    # root is the per-node directory state files are written to.
+    root: /var/lib/setec/snapshots
+    # fillThreshold is the used fraction above which Save calls are
+    # refused with ErrInsufficientStorage. 0 disables the check.
+    fillThreshold: 0.85
+  # kataSocketPattern is the format string the Coordinator and node-agent
+  # share to render a Firecracker API socket path from a Pod UID.
+  kataSocketPattern: /run/kata-containers/%s/firecracker.socket
+  # mTLS configuration for the operator<->node-agent gRPC channel. When
+  # certManager.enabled is true the chart renders Certificate resources
+  # and the Deployment/DaemonSet mount the resulting Secrets. Otherwise
+  # the operator must mount its own Secrets.
+  mTLS:
+    operatorCertSecret: setec-nodeagent-client-tls
+    nodeAgentCertSecret: setec-nodeagent-server-tls
+    caSecret: setec-nodeagent-ca
+    certManager:
+      enabled: false
+      issuerRef:
+        kind: ClusterIssuer
+        name: selfsigned
+
+# -- preWarmPool controls the per-SandboxClass pre-warm pool feature.
+# When disabled at the chart level, all SandboxClasses behave as if
+# their preWarmPoolSize were 0 regardless of field values.
+preWarmPool:
+  enabled: false

@@ -1,0 +1,128 @@
+{{- if .Values.frontend.enabled -}}
+{{- if not .Values.frontend.tlsCertSecretName -}}
+{{- fail "frontend.tlsCertSecretName is required when frontend.enabled=true; the frontend requires mTLS." -}}
+{{- end -}}
+{{- if not .Values.frontend.tlsClientCASecretName -}}
+{{- fail "frontend.tlsClientCASecretName is required when frontend.enabled=true; the frontend requires mTLS (client-cert verification)." -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "setec.fullname" . }}-frontend
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "setec.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        {{- include "setec.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+    spec:
+      serviceAccountName: {{ include "setec.fullname" . }}-frontend
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          args:
+            - --listen-addr={{ .Values.frontend.listenAddr }}
+            - --metrics-addr=:{{ .Values.frontend.metricsPort }}
+            - --tls-cert=/etc/setec/tls/tls.crt
+            - --tls-key=/etc/setec/tls/tls.key
+            - --tls-client-ca=/etc/setec/tls-ca/ca.crt
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.frontend.metricsPort }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/setec/tls
+              readOnly: true
+            - name: tls-ca
+              mountPath: /etc/setec/tls-ca
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.frontend.tlsCertSecretName }}
+        - name: tls-ca
+          secret:
+            secretName: {{ .Values.frontend.tlsClientCASecretName }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "setec.fullname" . }}-frontend
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  selector:
+    {{- include "setec.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: grpc
+      port: {{ .Values.frontend.servicePort }}
+      targetPort: grpc
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.frontend.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "setec.fullname" . }}-frontend
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "setec.fullname" . }}-frontend
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["setec.zero-day.ai"]
+    resources: [sandboxes]
+    verbs: [create, delete, get, list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "setec.fullname" . }}-frontend
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "setec.fullname" . }}-frontend
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "setec.fullname" . }}-frontend
+    namespace: {{ .Values.namespace }}
+{{- end }}

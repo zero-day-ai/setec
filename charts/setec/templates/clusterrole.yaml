@@ -1,0 +1,146 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "setec.fullname" . }}-manager
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - node.k8s.io
+    resources:
+      - runtimeclasses
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - setec.zero-day.ai
+    resources:
+      - sandboxes
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - setec.zero-day.ai
+    resources:
+      - sandboxes/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - setec.zero-day.ai
+    resources:
+      - sandboxes/status
+    verbs:
+      - get
+      - patch
+      - update
+  # Phase 2: cluster-scoped SandboxClass read.
+  - apiGroups:
+      - setec.zero-day.ai
+    resources:
+      - sandboxclasses
+    verbs:
+      - get
+      - list
+      - watch
+  # Phase 2: multi-tenancy namespace label lookups.
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+  # Phase 2: NetworkPolicy CRUD for Sandbox network isolation.
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+{{- if .Values.webhook.enabled }}
+  # Phase 2 webhook: read ValidatingWebhookConfiguration for self-inspection.
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingwebhookconfigurations
+    verbs:
+      - get
+      - list
+      - watch
+{{- end }}
+{{- if .Values.snapshots.enabled }}
+  # Phase 3: Snapshot CRD lifecycle.
+  - apiGroups:
+      - setec.zero-day.ai
+    resources:
+      - snapshots
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - setec.zero-day.ai
+    resources:
+      - snapshots/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - setec.zero-day.ai
+    resources:
+      - snapshots/finalizers
+    verbs:
+      - update
+  # Phase 3: per-tenant quota admission reads ResourceQuotas.
+  - apiGroups:
+      - ""
+    resources:
+      - resourcequotas
+    verbs:
+      - get
+      - list
+      - watch
+{{- end }}

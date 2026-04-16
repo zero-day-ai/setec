@@ -1,0 +1,15 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # The proto file lives under api/grpc/v1alpha1/sandbox.proto with
+    # package setec.v1alpha1. Buf's DEFAULT rule expects the directory
+    # path to match the package; we intentionally prefix with api/grpc
+    # to keep Go stubs segregated from the CRD api/ tree.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE

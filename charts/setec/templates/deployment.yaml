@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "setec.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "setec.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "setec.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "setec.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --metrics-bind-address=:{{ .Values.metricsPort }}
+            - --health-probe-bind-address=:{{ .Values.healthPort }}
+            - --leader-elect={{ .Values.leaderElect }}
+            - --runtime-class-name={{ .Values.runtimeClassName }}
+            - --node-selector-label={{ .Values.nodeSelectorLabel }}
+            {{- if .Values.multiTenancy.enabled }}
+            - --multi-tenancy-enabled
+            - --tenant-label-key={{ .Values.multiTenancy.tenantLabelKey }}
+            {{- end }}
+            {{- if and .Values.observability.enabled .Values.observability.otlpEndpoint }}
+            - --otlp-endpoint={{ .Values.observability.otlpEndpoint }}
+            {{- if not .Values.observability.otelTLS.enabled }}
+            - --otel-insecure
+            {{- else if .Values.observability.otelTLS.caSecretName }}
+            - --otel-ca-file=/etc/setec/otel-ca/ca.crt
+            {{- end }}
+            {{- end }}
+            {{- if .Values.webhook.enabled }}
+            - --webhook-enabled
+            {{- end }}
+            {{- if .Values.snapshots.enabled }}
+            - --snapshots-enabled
+            - --kata-socket-pattern={{ .Values.snapshots.kataSocketPattern }}
+            - --nodeagent-endpoint-pattern=%s.{{ include "setec.fullname" . }}-node-agent.{{ .Values.namespace }}.svc:50052
+            - --nodeagent-tls-cert=/etc/setec/nodeagent-tls/tls.crt
+            - --nodeagent-tls-key=/etc/setec/nodeagent-tls/tls.key
+            - --nodeagent-ca=/etc/setec/nodeagent-ca/ca.crt
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metricsPort }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- if or .Values.snapshots.enabled (and .Values.observability.enabled .Values.observability.otelTLS.enabled .Values.observability.otelTLS.caSecretName) }}
+          volumeMounts:
+            {{- if .Values.snapshots.enabled }}
+            - name: nodeagent-tls
+              mountPath: /etc/setec/nodeagent-tls
+              readOnly: true
+            - name: nodeagent-ca
+              mountPath: /etc/setec/nodeagent-ca
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.observability.enabled .Values.observability.otelTLS.enabled .Values.observability.otelTLS.caSecretName }}
+            - name: otel-ca
+              mountPath: /etc/setec/otel-ca
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.snapshots.enabled (and .Values.observability.enabled .Values.observability.otelTLS.enabled .Values.observability.otelTLS.caSecretName) }}
+      volumes:
+        {{- if .Values.snapshots.enabled }}
+        - name: nodeagent-tls
+          secret:
+            secretName: {{ .Values.snapshots.mTLS.operatorCertSecret }}
+        - name: nodeagent-ca
+          secret:
+            secretName: {{ .Values.snapshots.mTLS.caSecret }}
+        {{- end }}
+        {{- if and .Values.observability.enabled .Values.observability.otelTLS.enabled .Values.observability.otelTLS.caSecretName }}
+        - name: otel-ca
+          secret:
+            secretName: {{ .Values.observability.otelTLS.caSecretName }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 30

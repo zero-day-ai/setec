@@ -1,0 +1,130 @@
+// Copyright 2026 The Setec Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+
+syntax = "proto3";
+
+package setec.v1alpha1;
+
+option go_package = "github.com/zero-day-ai/setec/api/grpc/v1alpha1;setecv1alpha1grpc";
+
+// SandboxService is the gRPC frontend for launching and observing Setec
+// Sandboxes. Every operation is tenant-scoped via mTLS client certificate
+// (or, optionally, JWT). The frontend translates these RPCs to Sandbox
+// CR CRUD; all cluster-side policy — SandboxClass constraints,
+// ResourceQuota, NetworkPolicy — applies identically to direct CR
+// consumers and frontend clients.
+service SandboxService {
+  // Launch creates a Sandbox CR in the caller's tenant namespace and
+  // returns a sandbox id the caller can use for subsequent operations.
+  rpc Launch(LaunchRequest) returns (LaunchResponse);
+
+  // StreamLogs streams the Sandbox's backing Pod logs. Terminates when
+  // the Pod terminates (or follow=false and the Pod is already terminal).
+  rpc StreamLogs(StreamLogsRequest) returns (stream LogChunk);
+
+  // Wait blocks until the Sandbox reaches a terminal phase and returns
+  // its exit code and reason. A previously-terminated Sandbox returns
+  // immediately.
+  rpc Wait(WaitRequest) returns (WaitResponse);
+
+  // Kill deletes the Sandbox CR. Owner-reference GC removes the Pod and
+  // NetworkPolicy.
+  rpc Kill(KillRequest) returns (KillResponse);
+}
+
+// LaunchRequest carries everything needed to construct the Sandbox spec.
+message LaunchRequest {
+  // Name of a cluster-scoped SandboxClass (optional; empty defers to
+  // the cluster-default).
+  string sandbox_class = 1;
+
+  // OCI reference the microVM will run. Required.
+  string image = 2;
+
+  // Command executed inside the microVM. At least one entry required.
+  repeated string command = 3;
+
+  // Environment variables exposed to the workload. Optional.
+  map<string, string> env = 4;
+
+  // Resource budget. Required for classes without DefaultResources.
+  Resources resources = 5;
+
+  // Network policy intent. Optional; defaults to mode=full.
+  Network network = 6;
+
+  // Lifecycle constraints (timeout). Optional.
+  Lifecycle lifecycle = 7;
+}
+
+// LaunchResponse identifies the Sandbox created for the caller.
+message LaunchResponse {
+  // sandbox_id is the composite <namespace>/<name>/<uid> tuple used by
+  // subsequent RPCs.
+  string sandbox_id = 1;
+  string name = 2;
+  string namespace = 3;
+}
+
+// Resources mirrors Sandbox.spec.resources.
+message Resources {
+  uint32 vcpu = 1;
+  string memory = 2; // resource.Quantity string ("2Gi", "512Mi", ...)
+}
+
+// Network mirrors Sandbox.spec.network.
+message Network {
+  string mode = 1; // one of: full, egress-allow-list, none
+  repeated NetworkAllow allow = 2;
+}
+
+// NetworkAllow mirrors Sandbox.spec.network.allow entries.
+message NetworkAllow {
+  string host = 1;
+  uint32 port = 2;
+}
+
+// Lifecycle mirrors Sandbox.spec.lifecycle.
+message Lifecycle {
+  string timeout = 1; // Go-style duration: "30m", "8h"
+}
+
+// StreamLogsRequest selects the Sandbox and optionally follows new
+// output until the Pod terminates.
+message StreamLogsRequest {
+  string sandbox_id = 1;
+  bool follow = 2;
+}
+
+// LogChunk is a single-stream log payload. `stream` is "stdout" or
+// "stderr".
+message LogChunk {
+  bytes data = 1;
+  string stream = 2;
+}
+
+// WaitRequest blocks until the given Sandbox reaches a terminal phase.
+message WaitRequest {
+  string sandbox_id = 1;
+}
+
+// WaitResponse carries the Sandbox's terminal outcome.
+message WaitResponse {
+  string phase = 1;
+  int32 exit_code = 2;
+  string reason = 3;
+}
+
+// KillRequest deletes a Sandbox.
+message KillRequest {
+  string sandbox_id = 1;
+}
+
+// KillResponse is currently empty; a Sandbox that could not be deleted
+// surfaces the failure via gRPC status.
+message KillResponse {}

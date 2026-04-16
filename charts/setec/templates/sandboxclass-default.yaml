@@ -1,0 +1,10 @@
+{{- if .Values.defaultClass.enabled -}}
+apiVersion: setec.zero-day.ai/v1alpha1
+kind: SandboxClass
+metadata:
+  name: {{ .Values.defaultClass.name }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+spec:
+{{- toYaml .Values.defaultClass.spec | nindent 2 }}
+{{- end }}

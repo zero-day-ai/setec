@@ -1,0 +1,274 @@
+//go:build e2e
+
+/*
+Copyright 2026 The Setec Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package e2e contains the hardware-gated end-to-end test suite for Setec.
+//
+// Every file in this package carries the `e2e` build tag so that
+// `go test ./...` never compiles or runs these tests. The suite is intended
+// to run only on a self-hosted CI runner with KVM, Kata Containers, and the
+// `kata-fc` RuntimeClass installed. See .github/workflows/e2e.yml.
+//
+// The suite installs the charts/setec Helm chart into a throwaway namespace,
+// runs the 6 scenarios from design.md against real Kata+Firecracker, and then
+// uninstalls. Assertions are expressed through controller-runtime's typed
+// client against the live cluster; cluster mutation (install/uninstall) goes
+// through helm and kubectl subprocesses since that is idiomatic for E2E
+// harnesses and keeps Go code uncoupled from a specific helm-sdk version.
+package e2e
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	nodev1 "k8s.io/api/node/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	setecv1alpha1 "github.com/zero-day-ai/setec/api/v1alpha1"
+)
+
+// Release / namespace / chart paths for the suite. The release name and
+// namespace both embed a timestamp so parallel CI runs on the same cluster
+// don't collide. Override via environment for local debugging.
+var (
+	helmReleaseName string
+	testNamespace   string
+
+	// chartPath points at the Helm chart under source control. Defaults to
+	// the repo-relative path but callers can override for out-of-tree runs.
+	chartPath string
+
+	// kataRuntimeClass is the RuntimeClass the operator is configured to
+	// target. It must already exist on the cluster (kata-deploy provisions
+	// it). Scenario 5 temporarily removes and restores this resource.
+	kataRuntimeClass string
+
+	// operatorImage, if set, overrides the image used by the chart. Leave
+	// empty to use the chart default (ghcr.io/zero-day-ai/setec:<appVersion>)
+	// or an image that the runner has pre-pulled / locally built.
+	operatorImage string
+
+	// k8sClient is a typed controller-runtime client bound to the real
+	// cluster. Tests use it for all in-cluster assertions.
+	k8sClient client.Client
+
+	// scheme is shared by the k8sClient and by tests that need to decode
+	// YAML into typed objects.
+	scheme = runtime.NewScheme()
+)
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(setecv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(nodev1.AddToScheme(scheme))
+}
+
+// TestMain bootstraps the E2E environment before running any test function,
+// and tears it down afterward regardless of outcome. Failures during setup
+// cause the whole suite to bail out with a non-zero exit code so CI reports
+// a real failure rather than a flurry of individual "kubectl not found" style
+// errors.
+func TestMain(m *testing.M) {
+	stamp := time.Now().UTC().Format("20060102-150405")
+	helmReleaseName = envOr("SETEC_E2E_RELEASE", fmt.Sprintf("setec-e2e-%s", stamp))
+	testNamespace = envOr("SETEC_E2E_NAMESPACE", fmt.Sprintf("setec-e2e-%s", stamp))
+	chartPath = envOr("SETEC_E2E_CHART", resolveChartPath())
+	kataRuntimeClass = envOr("SETEC_E2E_RUNTIMECLASS", "kata-fc")
+	operatorImage = os.Getenv("SETEC_E2E_IMAGE") // optional
+
+	if err := buildClient(); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: failed to build Kubernetes client: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := preflight(); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: preflight failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := installChart(); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: helm install failed: %v\n", err)
+		// Best-effort teardown of whatever partial state got created.
+		_ = uninstallChart()
+		os.Exit(1)
+	}
+
+	code := m.Run()
+
+	if err := uninstallChart(); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: helm uninstall warning: %v\n", err)
+	}
+
+	os.Exit(code)
+}
+
+// buildClient constructs a controller-runtime client against the active
+// kubeconfig context. It uses the default loading rules so KUBECONFIG /
+// --kubeconfig / in-cluster all work without extra wiring.
+func buildClient() error {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	overrides := &clientcmd.ConfigOverrides{}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
+	if err != nil {
+		return fmt.Errorf("load kubeconfig: %w", err)
+	}
+
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("build client: %w", err)
+	}
+	k8sClient = c
+	return nil
+}
+
+// preflight verifies the environment has the tools and cluster features the
+// suite requires. It fails fast with actionable messages instead of panicking
+// deep inside a test case.
+func preflight() error {
+	for _, bin := range []string{"helm", "kubectl"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			return fmt.Errorf("required binary %q not on PATH: %w", bin, err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Minimum sanity check: we can reach the cluster at all.
+	var ns corev1.NamespaceList
+	if err := k8sClient.List(ctx, &ns); err != nil {
+		return fmt.Errorf("list namespaces: %w", err)
+	}
+
+	// The kata-fc RuntimeClass is required for all scenarios except #5,
+	// which temporarily deletes and restores it.
+	var rc nodev1.RuntimeClass
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: kataRuntimeClass}, &rc); err != nil {
+		return fmt.Errorf("RuntimeClass %q not found on cluster: %w (install kata-deploy before running E2E)", kataRuntimeClass, err)
+	}
+	return nil
+}
+
+// installChart creates the test namespace and helm-installs the chart into
+// it, waiting for the operator Deployment to become Ready before returning.
+func installChart() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Create the namespace. Helm could do this via --create-namespace, but
+	// keeping it explicit lets us set labels deterministically later if we
+	// need to enforce PodSecurity standards per-namespace.
+	nsObj := &corev1.Namespace{}
+	nsObj.Name = testNamespace
+	if err := k8sClient.Create(ctx, nsObj); err != nil {
+		return fmt.Errorf("create namespace %q: %w", testNamespace, err)
+	}
+
+	args := []string{
+		"install", helmReleaseName, chartPath,
+		"--namespace", testNamespace,
+		"--set", fmt.Sprintf("namespace=%s", testNamespace),
+		"--set", fmt.Sprintf("runtimeClassName=%s", kataRuntimeClass),
+		"--wait",
+		"--timeout", "5m",
+	}
+	if operatorImage != "" {
+		// operatorImage is expected as repo:tag. Split on the last colon.
+		repo, tag := splitImageRef(operatorImage)
+		args = append(args,
+			"--set", fmt.Sprintf("image.repository=%s", repo),
+			"--set", fmt.Sprintf("image.tag=%s", tag),
+		)
+	}
+
+	cmd := exec.Command("helm", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("helm install: %w", err)
+	}
+	return nil
+}
+
+// uninstallChart removes the Helm release and then deletes the namespace.
+// It is best-effort: we log but don't fail if teardown partially fails,
+// because the surrounding CI runner is responsible for returning the host
+// to a clean state between jobs.
+func uninstallChart() error {
+	var firstErr error
+	cmd := exec.Command("helm", "uninstall", helmReleaseName, "--namespace", testNamespace, "--wait", "--timeout", "2m")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		firstErr = fmt.Errorf("helm uninstall: %w", err)
+	}
+
+	// Delete namespace (ignore not-found; helm uninstall does not remove it).
+	delCmd := exec.Command("kubectl", "delete", "namespace", testNamespace, "--wait=true", "--ignore-not-found=true", "--timeout=2m")
+	delCmd.Stdout = os.Stdout
+	delCmd.Stderr = os.Stderr
+	if err := delCmd.Run(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("delete namespace: %w", err)
+	}
+
+	return firstErr
+}
+
+// resolveChartPath walks up from the test file location to find charts/setec.
+// Tests run with cwd=test/e2e, so ../../charts/setec is the canonical path.
+// We check existence to give a friendlier error than helm's opaque output.
+func resolveChartPath() string {
+	candidates := []string{
+		"../../charts/setec",
+		"charts/setec",
+	}
+	for _, c := range candidates {
+		if stat, err := os.Stat(c); err == nil && stat.IsDir() {
+			return c
+		}
+	}
+	// Fall through; helm will fail with a clear error if the path is wrong.
+	return "../../charts/setec"
+}
+
+// splitImageRef splits "repo/name:tag" into ("repo/name", "tag"). If there
+// is no tag it returns ("repo/name", "latest"), which matches Docker's
+// default and produces a predictable Helm --set value.
+func splitImageRef(ref string) (string, string) {
+	i := strings.LastIndex(ref, ":")
+	if i < 0 || strings.Contains(ref[i:], "/") {
+		return ref, "latest"
+	}
+	return ref[:i], ref[i+1:]
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

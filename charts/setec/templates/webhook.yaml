@@ -1,0 +1,64 @@
+{{- if .Values.webhook.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "setec.fullname" . }}-webhook
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  selector:
+    {{- include "setec.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: 9443
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "setec.fullname" . }}-validating-webhook
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: "{{ .Values.namespace }}/{{ include "setec.fullname" . }}-webhook-cert"
+  {{- end }}
+webhooks:
+  - name: vsandbox.setec.zero-day.ai
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    rules:
+      - apiGroups: ["setec.zero-day.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxes"]
+        scope: "Namespaced"
+    clientConfig:
+      service:
+        name: {{ include "setec.fullname" . }}-webhook
+        namespace: {{ .Values.namespace }}
+        path: /validate-setec-zero-day-ai-v1alpha1-sandbox
+        port: 443
+{{- if .Values.webhook.certManager.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "setec.fullname" . }}-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "setec.fullname" . }}-webhook-cert
+  dnsNames:
+    - "{{ include "setec.fullname" . }}-webhook.{{ .Values.namespace }}.svc"
+    - "{{ include "setec.fullname" . }}-webhook.{{ .Values.namespace }}.svc.cluster.local"
+  issuerRef:
+    kind: {{ .Values.webhook.certManager.issuerRef.kind }}
+    name: {{ .Values.webhook.certManager.issuerRef.name }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,331 @@
+# Standard CI quality gates for Setec.
+#
+# These jobs run on every pull request and on every push to main. They use
+# only GitHub-hosted `ubuntu-latest` runners so forks, first-time contributors,
+# and CI-only clones can all reproduce the gates without any bare-metal or
+# cloud-specific infrastructure. Hardware-gated E2E tests live in `e2e.yml`
+# and are intentionally NOT duplicated here.
+#
+# Jobs are independent (no `needs:` chain) so they run in parallel and each
+# failure is reported distinctly in the PR status.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (golangci-lint + buf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify lint config
+        run: make lint-config
+
+      - name: Run linter
+        run: make lint
+
+      - name: Install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
+
+      - name: Run buf lint
+        run: buf lint
+
+  test:
+    name: Unit + envtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # `make test` transitively installs setup-envtest and downloads the
+      # matching Kubernetes control-plane binaries via the Makefile targets,
+      # so no extra install step is required here.
+      - name: Run tests
+        run: make test
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+          if-no-files-found: warn
+          retention-days: 14
+
+  manifests-up-to-date:
+    name: Manifests up-to-date
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Regenerate manifests and deepcopy
+        run: make manifests generate
+
+      - name: Verify no uncommitted changes
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::Generated files are out of date."
+            echo "::error::Run 'make manifests generate' locally and commit the result."
+            exit 1
+          fi
+
+  proto-up-to-date:
+    name: Proto up-to-date
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Regenerate proto stubs
+        run: make proto
+
+      - name: Verify no uncommitted changes
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::Generated proto files are out of date."
+            echo "::error::Run 'make proto' locally and commit the result."
+            exit 1
+          fi
+
+  helm-lint:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.1
+
+      - name: Helm lint (strict)
+        run: helm lint charts/setec --strict
+
+      - name: Helm template (render check, default values)
+        # Ensures every template renders against default values without error.
+        run: helm template setec charts/setec >/dev/null
+
+      - name: Helm template (Phase 3 enabled)
+        # Catches regressions in Phase 3 chart extensions without
+        # requiring a live cluster. mTLS is mandatory so the tls
+        # Secret names are supplied explicitly.
+        run: |
+          helm template setec charts/setec \
+            --set snapshots.enabled=true \
+            --set nodeAgent.enabled=true \
+            --set webhook.enabled=true >/dev/null
+
+      - name: Helm template (frontend enabled with mTLS)
+        # The frontend requires both TLS Secret names; without them the
+        # chart refuses to render. This gate exercises that path.
+        run: |
+          helm template setec charts/setec \
+            --set frontend.enabled=true \
+            --set frontend.tlsCertSecretName=frontend-tls \
+            --set frontend.tlsClientCASecretName=frontend-ca >/dev/null
+
+  docker-build:
+    name: Docker build (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (linux/amd64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: false
+          tags: setec:ci-local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  flag-smoke-test:
+    name: Binary flag smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binaries
+        run: |
+          go build -o bin/manager ./cmd
+          go build -o bin/node-agent ./cmd/node-agent
+          go build -o bin/frontend ./cmd/frontend
+
+      - name: Smoke-test manager --help
+        # Catches flag-parsing regressions (Phase 3 adds snapshots-enabled
+        # and the nodeagent-tls-* triple). --help is a pure dry-run, no
+        # side effects.
+        run: |
+          ./bin/manager --help 2>&1 | tee manager-help.txt
+          grep -q -- '--snapshots-enabled' manager-help.txt
+          grep -q -- '--nodeagent-tls-cert' manager-help.txt
+          grep -q -- '--kata-socket-pattern' manager-help.txt
+
+      - name: Smoke-test node-agent --help
+        run: |
+          ./bin/node-agent --help 2>&1 | tee node-agent-help.txt
+          grep -q -- '-grpc-listen-addr' node-agent-help.txt
+          grep -q -- '-snapshot-root' node-agent-help.txt
+          grep -q -- '-snapshot-backend' node-agent-help.txt
+
+  link-check:
+    name: Markdown link check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Fail the build on broken internal links; external links remain
+          # warn-only for v0.1.0 so transient upstream outages do not block
+          # contributor PRs.
+          args: >-
+            --no-progress
+            --accept 200,204,206,429
+            --exclude-mail
+            --offline
+            './**/*.md'
+          fail: true
+
+  no-marker-in-source:
+    name: No TODO/FIXME/XXX/HACK markers in production source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Grep Go sources for markers
+        # Excludes vendor/bin dirs; uses grep exit 1 as the fail signal
+        # and inverts it so this step succeeds only when no matches.
+        run: |
+          if grep -rEn "TODO|FIXME|XXX|HACK" --include="*.go" --exclude-dir=vendor --exclude-dir=bin . ; then
+            echo "::error::production Go sources contain TODO/FIXME/XXX/HACK markers; resolve or delete each one"
+            exit 1
+          fi
+
+      - name: Grep markdown docs for markers
+        # docs/launch/ is allowed (release-tracking files track future work)
+        # but every other .md must be marker-free.
+        run: |
+          if grep -rEn "TODO|FIXME|XXX|HACK" --include="*.md" --exclude-dir=docs/launch . ; then
+            echo "::error::markdown docs outside docs/launch/ contain TODO/FIXME/XXX/HACK markers"
+            exit 1
+          fi
+
+  no-insecure-flag-in-chart:
+    name: Chart templates are mTLS-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Grep chart for insecure flags
+        run: |
+          if grep -rE "auth-disabled|insecure-grpc" charts/setec/ ; then
+            echo "::error::chart templates/values still reference insecure flags; mTLS is mandatory"
+            exit 1
+          fi
+
+  no-unimplemented-in-frontend:
+    name: Frontend has no codes.Unimplemented
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Grep internal/frontend for Unimplemented
+        run: |
+          if grep -rn "codes.Unimplemented" internal/frontend/ ; then
+            echo "::error::internal/frontend still returns codes.Unimplemented; implement or delete the RPC"
+            exit 1
+          fi
+
+  examples-build:
+    name: Examples build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - ai-code-exec
+          - ci-sandbox
+          - sec-research
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build ${{ matrix.example }}
+        working-directory: examples/${{ matrix.example }}
+        run: go build ./...
