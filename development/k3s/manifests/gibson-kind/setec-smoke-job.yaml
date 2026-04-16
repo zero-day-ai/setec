@@ -76,8 +76,9 @@ data:
         cli := sandboxv1.NewSandboxServiceClient(conn)
 
         launch, err := cli.Launch(ctx, &sandboxv1.LaunchRequest{
-            Image:   "alpine:3",
-            Command: []string{"echo", "smoke from kind"},
+            Image:     "alpine:3",
+            Command:   []string{"echo", "smoke from kind"},
+            Resources: &sandboxv1.Resources{Vcpu: 1, Memory: "128Mi"},
         })
         if err != nil { log.Fatalf("launch: %v", err) }
         sid := launch.GetSandboxId()
