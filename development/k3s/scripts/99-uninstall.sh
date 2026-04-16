@@ -11,12 +11,18 @@ export KUBECONFIG="${KUBECONFIG_PATH}"
 
 yellow(){ printf '\033[0;33m%s\033[0m\n' "$*"; }
 
-# Best-effort helm uninstall (only if cluster reachable)
-if [[ -f "${KUBECONFIG_PATH}" ]] && kubectl get nodes >/dev/null 2>&1; then
-    yellow "helm uninstall setec (best-effort)"
-    helm uninstall setec -n setec-system 2>/dev/null || true
-    yellow "helm uninstall kata-deploy (best-effort)"
-    helm uninstall kata-deploy -n kube-system 2>/dev/null || true
+# Best-effort helm uninstall only when the cluster has at least one Ready
+# node. Without this guard, helm waits indefinitely on API calls to NotReady
+# nodes. Even when skipped, k3s-uninstall.sh below removes everything.
+if [[ -f "${KUBECONFIG_PATH}" ]] && \
+   kubectl get nodes --no-headers 2>/dev/null | grep -qE '\sReady\s'; then
+    yellow "helm uninstall setec (best-effort, 30s timeout)"
+    timeout 30 helm uninstall setec -n setec-system --no-hooks --wait=false 2>/dev/null || true
+    yellow "helm uninstall kata-deploy (best-effort, 30s timeout)"
+    timeout 30 helm uninstall kata-deploy -n kube-system --no-hooks --wait=false 2>/dev/null || true
+else
+    yellow "Skipping helm uninstalls — no Ready node in cluster (or kubeconfig absent)"
+    yellow "k3s-uninstall.sh below will wipe cluster state regardless"
 fi
 
 # Official k3s uninstaller (silent if not installed)
