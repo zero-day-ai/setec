@@ -244,7 +244,6 @@ jobs:
           args: >-
             --no-progress
             --accept 200,204,206,429
-            --exclude-mail
             --offline
             './**/*.md'
           fail: true
