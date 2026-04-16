@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Verify a Pod scheduled with runtimeClassName: kata-fc actually boots in a
-# Firecracker microVM (kernel string differs from the host). Hard-fail if it
+# Verify a Pod scheduled with runtimeClassName: kata-qemu actually boots in
+# a qemu/kvm microVM (kernel string differs from the host). Hard-fail if it
 # silently falls back to runc.
+#
+# Uses kata-qemu (not kata-fc) because kata-fc requires the containerd
+# `devmapper` snapshotter, which in turn needs a thin-pool block device.
+# Setting that up is Setec's node-agent territory — out of scope for a
+# phase-0 smoke test. kata-qemu works with the default overlayfs
+# snapshotter and still provides full microVM hardware isolation.
 
 set -eo pipefail
 
@@ -16,14 +22,14 @@ red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 cleanup() { kubectl delete pod "${POD}" --ignore-not-found --grace-period=0 --force >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-green "Launching Pod ${POD} with runtimeClassName: kata-fc"
+green "Launching Pod ${POD} with runtimeClassName: kata-qemu"
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
   name: ${POD}
 spec:
-  runtimeClassName: kata-fc
+  runtimeClassName: kata-qemu
   restartPolicy: Never
   containers:
     - name: smoke
@@ -53,7 +59,7 @@ if [[ -z "${vm_kernel}" ]]; then
     exit 1
 fi
 if [[ "${vm_kernel}" == "${host_kernel}" ]]; then
-    red "FAIL: VM kernel matches host — silently fell back to runc, kata-fc not in use"
+    red "FAIL: VM kernel matches host — silently fell back to runc, kata not in use"
     exit 1
 fi
-green "PASS: kata-fc boots a real microVM"
+green "PASS: kata-qemu boots a real microVM"
