@@ -4,14 +4,20 @@
 #
 # Prerequisites:
 #   - Kind cluster 'gibson' is running and current kube context can reach it
-#   - Kind cluster config has 'extraHosts: host-gateway' (see README)
 #   - PKI exists under ../pki/ (run 30-generate-pki.sh first)
+#
+# The Job dials the Setec frontend at the host's LAN IP (the NodePort
+# exposure on the k3s cluster). Kind Pods can reach the host LAN directly
+# via the Docker bridge — no Kind cluster config changes required.
 
 set -eo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKI="${ROOT}/pki"
 KIND_CONTEXT="${KIND_CONTEXT:-kind-gibson}"
+NODEPORT="${SETEC_NODEPORT:-30051}"
+HOST_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+SETEC_ADDR="${SETEC_ADDR:-${HOST_IP}:${NODEPORT}}"
 
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -40,7 +46,13 @@ kubectl --context="${KIND_CONTEXT}" apply -f "${GEN}"
 green "Applying smoke Job (deletes any prior run first)"
 kubectl --context="${KIND_CONTEXT}" -n gibson delete job setec-smoke-cross-cluster --ignore-not-found
 kubectl --context="${KIND_CONTEXT}" -n gibson delete configmap setec-smoke-source --ignore-not-found
-kubectl --context="${KIND_CONTEXT}" apply -f "${ROOT}/manifests/gibson-kind/setec-smoke-job.yaml"
+
+# Substitute SETEC_ADDR into the job manifest (template uses __SETEC_ADDR__).
+JOB_RENDERED=$(mktemp)
+sed "s|__SETEC_ADDR__|${SETEC_ADDR}|" "${ROOT}/manifests/gibson-kind/setec-smoke-job.yaml" > "${JOB_RENDERED}"
+green "Dialling Setec at ${SETEC_ADDR}"
+kubectl --context="${KIND_CONTEXT}" apply -f "${JOB_RENDERED}"
+rm -f "${JOB_RENDERED}"
 
 green "Waiting for Job to complete (up to 5m)..."
 if ! kubectl --context="${KIND_CONTEXT}" -n gibson wait --for=condition=Complete --timeout=5m job/setec-smoke-cross-cluster 2>/dev/null; then

@@ -42,9 +42,17 @@ data:
         "google.golang.org/grpc/credentials"
     )
 
-    const addr = "host.docker.internal:30051"
+    // Setec frontend address. Override via SETEC_ADDR env var. Default is the
+    // host LAN IP on port 30051 (the NodePort the dev k3s cluster exposes).
+    // The LAN IP is reachable from Kind Pods without any Kind cluster config
+    // changes, whereas host.docker.internal requires `extraHosts: host-gateway`
+    // in the Kind cluster config — we avoid that by taking the LAN route.
+    var addr = os.Getenv("SETEC_ADDR")
 
     func main() {
+        if addr == "" {
+            log.Fatal("SETEC_ADDR not set")
+        }
         ca, err := os.ReadFile("/etc/setec-tls/ca.crt")
         if err != nil { log.Fatalf("read ca: %v", err) }
         cert, err := tls.LoadX509KeyPair("/etc/setec-tls/client.crt", "/etc/setec-tls/client.key")
@@ -130,6 +138,8 @@ spec:
           env:
             - name: GOPROXY
               value: "https://proxy.golang.org,direct"
+            - name: SETEC_ADDR
+              value: "__SETEC_ADDR__"  # substituted by 65-smoke-cross-cluster.sh
       volumes:
         - name: src
           configMap:
