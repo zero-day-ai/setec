@@ -44,37 +44,56 @@ fi
 # kata-deploy 3.28+ requires k3s's rendered /var/lib/rancher/k3s/agent/etc/
 # containerd/config.toml to import the drop-in directory config.toml.d so
 # kata-deploy can drop its runtime handler fragments there at install time.
-# k3s regenerates config.toml from a Go template on every restart, so the
-# fix is to provide a config.toml.tmpl that adds the import before handing
-# off to k3s's "base" template. Idempotent: only writes the template if
-# it's missing or different; only restarts k3s if we changed the template.
+# k3s regenerates config.toml from a Go template on every restart; the
+# supported customisation is to copy config.toml.tmpl.example to
+# config.toml.tmpl and edit it. An earlier version of this script used
+# `{{ template "base" . }}` to inherit the default — that named template
+# does not exist in k3s 1.31.x, so the rendered config.toml was effectively
+# empty and containerd started without the CRI plugin. We now copy the
+# full example verbatim and prepend the imports line at the top.
+# Idempotent: only writes the template if it's missing or doesn't already
+# contain the imports line; only restarts k3s if we changed it.
 # ─────────────────────────────────────────────────────────────────────────
 K3S_CONTAINERD_DIR=/var/lib/rancher/k3s/agent/etc/containerd
 K3S_TMPL="${K3S_CONTAINERD_DIR}/config.toml.tmpl"
-DESIRED_TMPL=$(cat <<'EOF'
-# Managed by opensource/setec/development/k3s/scripts/20-install-kata.sh.
-# Adds the drop-in import that kata-deploy (3.28+) requires, then falls
-# through to k3s's built-in containerd config template.
-imports = ["/var/lib/rancher/k3s/agent/etc/containerd/config.toml.d/*.toml"]
+K3S_TMPL_EXAMPLE="${K3S_CONTAINERD_DIR}/config.toml.tmpl.example"
+IMPORTS_LINE='imports = ["/var/lib/rancher/k3s/agent/etc/containerd/config.toml.d/*.toml"]'
 
-{{ template "base" . }}
-EOF
-)
-
-tmpl_changed=0
-if ! sudo test -f "${K3S_TMPL}" || ! echo "${DESIRED_TMPL}" | sudo cmp -s - "${K3S_TMPL}"; then
-    green "Writing k3s containerd config template at ${K3S_TMPL}"
-    sudo mkdir -p "${K3S_CONTAINERD_DIR}"
-    echo "${DESIRED_TMPL}" | sudo tee "${K3S_TMPL}" >/dev/null
-    tmpl_changed=1
+need_template=0
+if ! sudo test -f "${K3S_TMPL}"; then
+    need_template=1
+elif ! sudo grep -Fq 'config.toml.d/*.toml' "${K3S_TMPL}"; then
+    need_template=1
 fi
 
-if [[ ${tmpl_changed} -eq 1 ]]; then
+if [[ ${need_template} -eq 1 ]]; then
+    if ! sudo test -f "${K3S_TMPL_EXAMPLE}"; then
+        red "FAIL: ${K3S_TMPL_EXAMPLE} is missing."
+        red "      k3s writes this file after it has booted containerd at least once."
+        red "      Run 'sudo systemctl restart k3s' and wait 30s, then re-run this script."
+        exit 1
+    fi
+    green "Writing ${K3S_TMPL} (example template + drop-in imports prefix)"
+    sudo mkdir -p "${K3S_CONTAINERD_DIR}"
+    sudo sh -c "
+        {
+            printf '# Managed by opensource/setec/development/k3s/scripts/20-install-kata.sh\n'
+            printf '# Prepends the drop-in imports line that kata-deploy 3.28+ requires.\n'
+            printf '%s\n\n' '${IMPORTS_LINE}'
+            cat '${K3S_TMPL_EXAMPLE}'
+        } > '${K3S_TMPL}'
+    "
+
     green "Restarting k3s so it regenerates containerd/config.toml with the drop-in import"
     sudo systemctl restart k3s
-    deadline=$(( $(date +%s) + 60 ))
+    deadline=$(( $(date +%s) + 120 ))
     while ! kubectl get nodes 2>/dev/null | grep -q ' Ready '; do
-        [[ $(date +%s) -gt $deadline ]] && { red "FAIL: k3s did not return to Ready within 60s after restart"; exit 1; }
+        [[ $(date +%s) -gt $deadline ]] && {
+            red "FAIL: k3s did not return to Ready within 2m after restart"
+            red "      Inspect: sudo journalctl -u k3s -n 50 --no-pager"
+            red "      If containerd is stuck: sudo rm ${K3S_TMPL} && sudo systemctl restart k3s"
+            exit 1
+        }
         sleep 2
     done
     # Force any stuck kata-deploy pods from a prior run to re-roll against
