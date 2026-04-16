@@ -31,7 +31,7 @@ fi
 green "Generating server cert (CN setec-frontend.setec-system.svc)"
 cat > "${PKI}/server.cnf" <<EOF
 [req]
-distinguished_name=req
+distinguished_name=req_distinguished_name
 prompt=no
 [req_distinguished_name]
 CN=setec-frontend.setec-system.svc
@@ -63,7 +63,7 @@ rm -f "${PKI}/server.csr" "${PKI}/server.cnf"
 green "Generating client cert (CN gibson-dev)"
 cat > "${PKI}/client.cnf" <<EOF
 [req]
-distinguished_name=req
+distinguished_name=req_distinguished_name
 prompt=no
 [req_distinguished_name]
 CN=gibson-dev
