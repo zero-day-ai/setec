@@ -104,7 +104,7 @@ make helm-lint    # lint the Helm chart
 make e2e          # bare-metal E2E suite (requires KVM + Kata)
 ```
 
-Non-trivial changes go through [`.spec-workflow/`](.spec-workflow/) so design is visible before code lands. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Non-trivial changes go through a short design-before-code cycle described in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Community
 
