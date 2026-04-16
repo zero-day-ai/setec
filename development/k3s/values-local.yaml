@@ -1,0 +1,46 @@
+# Setec chart overlay for the local single-node k3s dev cluster.
+#
+# Every override below is annotated with the reason for the deviation from
+# the chart's defaults. Production deployments use SPIRE for TLS material,
+# multi-node sandbox pools with taints, and a real LoadBalancer/Ingress —
+# none of which apply on a single-node dev box.
+
+frontend:
+  # Dev TLS material delivered via Secrets created by 40-install-setec.sh
+  # from the dev PKI under ../pki/. Production delivers via SPIRE.
+  tlsCertSecretName: setec-frontend-tls
+  tlsClientCASecretName: setec-frontend-ca
+
+  # Single-node dev sizing — keep memory low so the node has headroom for
+  # operator + sandbox workloads on the same host.
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Standard listen + service ports. NodePort exposure is bolted on via a
+  # sibling Service (manifests/setec-nodeport.yaml) because the chart does
+  # not template a NodePort field today.
+  listenAddr: ":50051"
+  servicePort: 50051
+
+operator:
+  # Single-node dev: the operator co-locates with the sandbox workloads on
+  # the only node (no taint isolation). Production uses a separate system
+  # pool with sandbox-pool taint tolerations.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+nodeAgent:
+  # Dev cluster runs node-agent everywhere (DaemonSet default). No phase-2
+  # thin-pool config needed for the local smoke; defaults are fine.
+  enabled: true
