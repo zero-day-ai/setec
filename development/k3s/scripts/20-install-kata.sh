@@ -40,6 +40,11 @@ fi
     exit 1
 }
 
+# The kata-deploy chart depends on node-feature-discovery; fetch into charts/.
+# Idempotent — a no-op if charts/ is already populated and up-to-date.
+green "helm dependency build (fetches node-feature-discovery subchart)"
+helm dependency build "${CHART_PATH}"
+
 green "helm upgrade --install kata-deploy (k3s distribution)"
 helm upgrade --install kata-deploy "${CHART_PATH}" \
     --namespace kube-system \
