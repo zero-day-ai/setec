@@ -4,3 +4,4 @@ kubeconfig
 *.key
 *.pem
 manifests/gibson-kind/*.generated.yaml
+.cache/
