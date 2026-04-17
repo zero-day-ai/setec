@@ -49,6 +49,7 @@ import (
 	"github.com/zero-day-ai/setec/internal/netpol"
 	"github.com/zero-day-ai/setec/internal/podspec"
 	"github.com/zero-day-ai/setec/internal/prereq"
+	runtimepkg "github.com/zero-day-ai/setec/internal/runtime"
 	"github.com/zero-day-ai/setec/internal/snapshot"
 	"github.com/zero-day-ai/setec/internal/status"
 	"github.com/zero-day-ai/setec/internal/tenancy"
@@ -94,14 +95,19 @@ type SandboxReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 
-	// RuntimeClassName is the name of the RuntimeClass the backing Pod will
-	// reference (default "kata-fc"). Passed through to podspec.Build and to
-	// prereq.Check.
-	RuntimeClassName string
+	// Runtimes is the registry of enabled RuntimeDispatcher implementations.
+	// It is used by selectRuntime to pick the appropriate backend for each Sandbox.
+	// Set at construction time; replaces the old RuntimeClassName string field.
+	Runtimes *runtimepkg.Registry
+
+	// RuntimeCfg is the operator-wide runtime configuration loaded from
+	// --runtimes-config (or synthesized from the legacy --runtime-class-name flag).
+	// selectRuntime reads cluster defaults and fallback chains from this value.
+	RuntimeCfg *runtimepkg.RuntimeConfig
 
 	// NodeSelectorLabel is the label key Nodes must carry to be considered
 	// Kata-capable (default "katacontainers.io/kata-runtime"). Used by
-	// prereq.Check only; the reconciler itself does not select Nodes.
+	// prereq.CheckMulti only; the reconciler itself does not select Nodes directly.
 	NodeSelectorLabel string
 
 	// --- Phase 2 optional dependencies ---
@@ -282,20 +288,52 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// (6) Compute the deterministic Pod name.
 	podName := sb.Name + podspec.PodNameSuffix
 
-	// (7) Verify cluster prerequisites. A missing RuntimeClass is not an
-	// error — it is a cluster-configuration issue the operator surfaces via
-	// Events so `kubectl describe sandbox` shows remediation guidance.
-	prereqResult, err := prereq.Check(ctx, r.Client, r.effectiveRuntimeClassName(cls), r.NodeSelectorLabel)
-	if err != nil {
-		return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("prereq check: %w", err))
-	}
-	if !prereqResult.RuntimeClassPresent {
-		msg := fmt.Sprintf(runtimeUnavailableMessage, r.effectiveRuntimeClassName(cls))
-		r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonRuntimeUnavailable, msg)
-		if err := r.patchPendingStatus(ctx, sb, eventReasonRuntimeUnavailable); err != nil {
-			return ctrl.Result{}, fmt.Errorf("patch RuntimeUnavailable status: %w", err)
+	// (7) Verify cluster prerequisites. Missing RuntimeClasses are not errors —
+	// they are cluster-configuration issues the operator surfaces via Events
+	// so `kubectl describe sandbox` shows remediation guidance.
+	// When Runtimes/RuntimeCfg are set (new path) we check all enabled backends;
+	// when they are nil we fall back to the legacy single-class check for back-compat.
+	if r.Runtimes != nil && r.RuntimeCfg != nil {
+		classNames := make(map[string]string, len(r.RuntimeCfg.Runtimes))
+		for name, bc := range r.RuntimeCfg.Runtimes {
+			if bc.Enabled {
+				classNames[name] = bc.RuntimeClassName
+			}
 		}
-		return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+		prereqResult, err := prereq.CheckMulti(ctx, r.Client, r.RuntimeCfg.EnabledBackends(), classNames, r.NodeSelectorLabel)
+		if err != nil {
+			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("prereq check: %w", err))
+		}
+		if !prereqResult.RuntimeClassPresent {
+			// Use the first warning as the event message; it names the offending backend.
+			msg := runtimeUnavailableMessage
+			if len(prereqResult.Warnings) > 0 {
+				msg = prereqResult.Warnings[0]
+			}
+			r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonRuntimeUnavailable, msg)
+			if err := r.patchPendingStatus(ctx, sb, eventReasonRuntimeUnavailable); err != nil {
+				return ctrl.Result{}, fmt.Errorf("patch RuntimeUnavailable status: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+		}
+	} else {
+		// Legacy path: single-class check with the operator-wide default.
+		legacyClassName := ""
+		if r.RuntimeCfg != nil {
+			legacyClassName = r.RuntimeCfg.Defaults.Runtime.Backend
+		}
+		prereqResult, err := prereq.Check(ctx, r.Client, legacyClassName, r.NodeSelectorLabel)
+		if err != nil {
+			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("prereq check: %w", err))
+		}
+		if !prereqResult.RuntimeClassPresent {
+			msg := fmt.Sprintf(runtimeUnavailableMessage, legacyClassName)
+			r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonRuntimeUnavailable, msg)
+			if err := r.patchPendingStatus(ctx, sb, eventReasonRuntimeUnavailable); err != nil {
+				return ctrl.Result{}, fmt.Errorf("patch RuntimeUnavailable status: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+		}
 	}
 
 	// (8) Fetch the owned Pod. If it does not exist and the Sandbox has
@@ -303,14 +341,24 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// short-circuit here so a completed or failed Sandbox does not respawn
 	// its Pod after Kubernetes garbage-collects it.
 	pod := &corev1.Pod{}
-	err = r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod)
+	err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod)
 	switch {
 	case apierrors.IsNotFound(err):
 		if isTerminalPhase(sb.Status.Phase) {
 			logger.V(1).Info("Sandbox is terminal; not recreating Pod", "phase", sb.Status.Phase)
 			return ctrl.Result{}, nil
 		}
-		if res, err := r.createPod(ctx, sb, cls, pinnedNode); err != nil || res.RequeueAfter > 0 {
+		// Select the runtime backend for this Sandbox.
+		sel, selErr := r.selectRuntime(ctx, sb, cls)
+		if selErr != nil {
+			if errors.Is(selErr, runtimepkg.ErrNoEligibleRuntime) {
+				// Already transitioned to Failed inside selectRuntime; requeue
+				// slowly in case node labels change.
+				return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+			}
+			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("select runtime: %w", selErr))
+		}
+		if res, err := r.createPod(ctx, sb, cls, pinnedNode, sel); err != nil || res.RequeueAfter > 0 {
 			return res, err
 		}
 		// Fall through to netpol reconciliation and status convergence
@@ -375,14 +423,123 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-// effectiveRuntimeClassName returns the class-specific RuntimeClass
-// override if one is configured, else the operator-wide default. Kept as
-// a helper so the prereq check and Pod build agree on the effective name.
-func (r *SandboxReconciler) effectiveRuntimeClassName(cls *setecv1alpha1.SandboxClass) string {
-	if cls != nil && cls.Spec.RuntimeClassName != "" {
-		return cls.Spec.RuntimeClassName
+// selectRuntime picks the isolation backend for this Sandbox by gathering a
+// cluster-wide view of node capabilities (via Node labels) and delegating to
+// r.Runtimes.Select. It writes status.runtime.chosen on success and
+// transitions the Sandbox to Failed with reason NoEligibleNode when no backend
+// can be satisfied. It also emits a fallback metric when the chosen backend
+// differs from the originally requested one.
+//
+// When Runtimes or RuntimeCfg are nil (legacy path) it synthesizes a minimal
+// Selection from the class RuntimeClassName / defaults so existing code paths
+// keep working unchanged.
+func (r *SandboxReconciler) selectRuntime(
+	ctx context.Context,
+	sb *setecv1alpha1.Sandbox,
+	cls *setecv1alpha1.SandboxClass,
+) (*runtimepkg.Selection, error) {
+	logger := log.FromContext(ctx)
+
+	// Legacy path: no registry wired. Synthesize a Selection using the
+	// class RuntimeClassName or the legacy operator default so the reconciler
+	// stays backward-compatible without a registry.
+	if r.Runtimes == nil || r.RuntimeCfg == nil {
+		rcName := ""
+		if cls != nil && cls.Spec.RuntimeClassName != "" {
+			rcName = cls.Spec.RuntimeClassName
+		}
+		// Build a minimal inline dispatcher that only supplies the RuntimeClass name.
+		return &runtimepkg.Selection{
+			Backend:    runtimepkg.BackendKataFC,
+			Dispatcher: runtimepkg.NewKataFCDispatcher(runtimepkg.BackendConfig{RuntimeClassName: rcName}),
+		}, nil
 	}
-	return r.RuntimeClassName
+
+	// Apply local defaulting: when the SandboxClass has no Runtime struct
+	// (legacy class applied before the webhook defaulter runs), treat the
+	// class as requesting the cluster-default backend. This mirrors what the
+	// defaulting webhook will eventually do.
+	effectiveCls := cls
+	if cls != nil && cls.Spec.Runtime == nil {
+		clsCopy := *cls
+		clsCopy.Spec.Runtime = &setecv1alpha1.SandboxClassRuntime{
+			Backend: r.RuntimeCfg.Defaults.Runtime.Backend,
+		}
+		effectiveCls = &clsCopy
+	}
+
+	// Gather capabilities: list all Nodes and collect the union of backends
+	// they advertise via setec.zero-day.ai/runtime.<backend>=true labels.
+	// We take a cluster-wide union because we cannot pre-pick a node (the
+	// scheduler does that); we only need to know whether any capable node
+	// exists for each candidate backend.
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		return nil, fmt.Errorf("list nodes for capability detection: %w", err)
+	}
+	capSet := make(map[string]bool)
+	for _, node := range nodeList.Items {
+		for _, backend := range runtimepkg.AllKnownBackends {
+			label := "setec.zero-day.ai/runtime." + backend
+			if val, ok := node.Labels[label]; ok && val == "true" {
+				capSet[backend] = true
+			}
+		}
+	}
+	nodeCapabilities := make([]string, 0, len(capSet))
+	for backend := range capSet {
+		nodeCapabilities = append(nodeCapabilities, backend)
+	}
+
+	sel, err := r.Runtimes.Select(effectiveCls, r.RuntimeCfg, nodeCapabilities)
+	if err != nil {
+		if errors.Is(err, runtimepkg.ErrNoEligibleRuntime) {
+			logger.Info("no eligible runtime for Sandbox",
+				"sandbox", sb.Name,
+				"namespace", sb.Namespace,
+				"nodeCapabilities", nodeCapabilities,
+				"error", err.Error(),
+			)
+			// Transition Sandbox to Failed with a clear reason.
+			reason := "NoEligibleNode"
+			original := sb.DeepCopy()
+			sb.Status.Phase = setecv1alpha1.SandboxPhaseFailed
+			sb.Status.Reason = reason
+			now := metav1.NewTime(time.Now())
+			sb.Status.LastTransitionTime = &now
+			if patchErr := r.Status().Patch(ctx, sb, client.MergeFrom(original)); patchErr != nil {
+				return nil, fmt.Errorf("patch NoEligibleNode status: %w", patchErr)
+			}
+			return nil, runtimepkg.ErrNoEligibleRuntime
+		}
+		return nil, err
+	}
+
+	// Record fallback metric when the chosen backend differs from requested.
+	if sel.FellBack {
+		logger.Info("runtime fallback applied",
+			"sandbox", sb.Name,
+			"from", sel.FromBackend,
+			"to", sel.Backend,
+		)
+		r.Recorder.Eventf(sb, corev1.EventTypeWarning, "RuntimeFallback",
+			"runtime fallback: requested %q, using %q", sel.FromBackend, sel.Backend)
+		if r.MetricsCollector != nil {
+			r.MetricsCollector.IncFallback(sel.FromBackend, sel.Backend)
+		}
+	}
+
+	// Persist chosen backend into status.runtime.chosen.
+	original := sb.DeepCopy()
+	sb.Status.Runtime = &setecv1alpha1.SandboxRuntimeStatus{Chosen: sel.Backend}
+	if err := r.Status().Patch(ctx, sb, client.MergeFrom(original)); err != nil {
+		// Non-fatal: status write failure should not block pod creation.
+		logger.Info("warning: failed to write status.runtime.chosen; continuing",
+			"error", err.Error(),
+		)
+	}
+
+	return sel, nil
 }
 
 // resolveTenant returns the tenant ID of the Sandbox's namespace (when
@@ -505,18 +662,28 @@ func (r *SandboxReconciler) recordTransition(
 		className = cls.Name
 		vmm = string(cls.Spec.VMM)
 	}
+	// Determine the runtime label: prefer status.runtime.chosen (written by
+	// selectRuntime), fall back to the legacy VMM field for backward compat.
+	runtimeLabel := vmm
+	if curr.Runtime != nil && curr.Runtime.Chosen != "" {
+		runtimeLabel = curr.Runtime.Chosen
+	} else if sb.Status.Runtime != nil && sb.Status.Runtime.Chosen != "" {
+		runtimeLabel = sb.Status.Runtime.Chosen
+	}
+
 	if prev != curr.Phase {
 		r.MetricsCollector.RecordPhaseTransition(tenantID, className, curr.Phase)
 
 		// Cold-start: Pending → Running uses Pod's Running timestamp
-		// minus Sandbox creation time.
+		// minus Sandbox creation time. Emits with both new runtime label
+		// and legacy vmm label during the dual-write transition period.
 		if curr.Phase == setecv1alpha1.SandboxPhaseRunning && !sb.CreationTimestamp.IsZero() {
 			startTime := pod.CreationTimestamp.Time
 			if curr.StartedAt != nil {
 				startTime = curr.StartedAt.Time
 			}
 			if d := startTime.Sub(sb.CreationTimestamp.Time); d > 0 {
-				r.MetricsCollector.RecordColdStart(vmm, className, d)
+				r.MetricsCollector.ObserveColdStart(runtimeLabel, vmm, className, d)
 			}
 		}
 
@@ -550,8 +717,30 @@ func setSpanError(span trace.Span, msg string) {
 // override (if set) and inherits the class's NodeSelector. nodeName, when
 // non-empty, pins the Pod to a specific node — used by the Phase 3
 // snapshot-restore flow to land on the node holding the snapshot state.
-func (r *SandboxReconciler) createPod(ctx context.Context, sb *setecv1alpha1.Sandbox, cls *setecv1alpha1.SandboxClass, nodeName string) (ctrl.Result, error) {
-	pod, err := podspec.BuildWithOptions(sb, r.effectiveRuntimeClassName(cls), podspec.BuildOptions{NodeName: nodeName})
+// sel carries the dispatcher-selected backend and is applied via
+// podspec.WithRuntimeSelection as the last option in the build pipeline.
+func (r *SandboxReconciler) createPod(
+	ctx context.Context,
+	sb *setecv1alpha1.Sandbox,
+	cls *setecv1alpha1.SandboxClass,
+	nodeName string,
+	sel *runtimepkg.Selection,
+) (ctrl.Result, error) {
+	// Determine the runtimeClassName: prefer the dispatcher's value (from sel),
+	// then the class override, then the legacy operator default.
+	rcName := ""
+	if sel != nil {
+		rcName = sel.Dispatcher.RuntimeClassName()
+	}
+	if rcName == "" && cls != nil && cls.Spec.RuntimeClassName != "" {
+		rcName = cls.Spec.RuntimeClassName
+	}
+
+	opts := podspec.BuildOptions{NodeName: nodeName}
+	if sel != nil {
+		opts.RuntimeSelection = sel
+	}
+	pod, err := podspec.BuildWithOptions(sb, rcName, opts)
 	if err != nil {
 		return r.recordAndReturnErr(sb, eventReasonPodCreateFailed, fmt.Errorf("build Pod spec: %w", err))
 	}

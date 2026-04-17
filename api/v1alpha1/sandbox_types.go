@@ -261,6 +261,17 @@ type SandboxSpec struct {
 	SnapshotRef *SandboxSnapshotRef `json:"snapshotRef,omitempty"`
 }
 
+// SandboxRuntimeStatus records the runtime backend that was actually selected
+// for this Sandbox after fallback resolution. Populated by the reconciler
+// once a backend is chosen; empty while the Sandbox is still Pending.
+type SandboxRuntimeStatus struct {
+	// Chosen is the name of the backend selected after evaluating the
+	// SandboxClass's primary backend and any fallback chain. One of
+	// kata-fc, kata-qemu, gvisor, or runc.
+	// +optional
+	Chosen string `json:"chosen,omitempty"`
+}
+
 // SandboxStatus reflects the observed state of a Sandbox.
 type SandboxStatus struct {
 	// Phase is the high-level lifecycle state derived from the underlying
@@ -300,12 +311,18 @@ type SandboxStatus struct {
 	// the Sandbox resumes.
 	// +optional
 	PausedAt *metav1.Time `json:"pausedAt,omitempty"`
+
+	// Runtime records the isolation backend selected for this Sandbox.
+	// Populated by the reconciler after backend selection; nil while Pending.
+	// +optional
+	Runtime *SandboxRuntimeStatus `json:"runtime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=sbx
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Runtime",type=string,JSONPath=`.status.runtime.chosen`
 // +kubebuilder:printcolumn:name="Class",type=string,JSONPath=`.spec.sandboxClassName`
 // +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.image`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

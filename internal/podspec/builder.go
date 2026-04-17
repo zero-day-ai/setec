@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	setecv1alpha1 "github.com/zero-day-ai/setec/api/v1alpha1"
+	runtimepkg "github.com/zero-day-ai/setec/internal/runtime"
 )
 
 const (
@@ -92,6 +93,12 @@ type BuildOptions struct {
 	// snapshot-restore flow which must land on the node holding the
 	// snapshot state files.
 	NodeName string
+
+	// RuntimeSelection, when non-nil, overrides the runtimeClassName
+	// argument and additionally injects NodeAffinity, Overhead, and any
+	// dispatcher-specific pod mutations.  Applied as the last step in
+	// BuildWithOptions so dispatchers see the fully-assembled pod.
+	RuntimeSelection *runtimepkg.Selection
 }
 
 // Build transforms a Sandbox custom resource into the corev1.Pod the
@@ -126,8 +133,22 @@ func Build(sb *setecv1alpha1.Sandbox, runtimeClassName string) (*corev1.Pod, err
 // BuildWithOptions is the extended Phase 3 entry point. Build is a
 // thin wrapper that passes the zero-value options, so existing
 // Phase 1/2 callers are unaffected.
+//
+// When opts.RuntimeSelection is set it is applied LAST so the dispatcher's
+// MutatePod sees the fully-constructed pod. The runtimeClassName argument is
+// used as the initial runtime class; RuntimeSelection.Dispatcher.RuntimeClassName()
+// overrides it when non-empty.
 func BuildWithOptions(sb *setecv1alpha1.Sandbox, runtimeClassName string, opts BuildOptions) (*corev1.Pod, error) {
-	if err := validate(sb, runtimeClassName); err != nil {
+	// When a RuntimeSelection is provided and its Dispatcher returns a non-empty
+	// RuntimeClassName, that value takes precedence over the runtimeClassName arg.
+	effectiveRCName := runtimeClassName
+	if opts.RuntimeSelection != nil {
+		if rcn := opts.RuntimeSelection.Dispatcher.RuntimeClassName(); rcn != "" {
+			effectiveRCName = rcn
+		}
+	}
+
+	if err := validate(sb, effectiveRCName); err != nil {
 		return nil, err
 	}
 
@@ -162,7 +183,7 @@ func BuildWithOptions(sb *setecv1alpha1.Sandbox, runtimeClassName string, opts B
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
 		Spec: corev1.PodSpec{
-			RuntimeClassName: ptrString(runtimeClassName),
+			RuntimeClassName: ptrString(effectiveRCName),
 			RestartPolicy:    corev1.RestartPolicyNever,
 			Containers:       []corev1.Container{container},
 		},
@@ -172,7 +193,77 @@ func BuildWithOptions(sb *setecv1alpha1.Sandbox, runtimeClassName string, opts B
 		pod.Spec.NodeName = opts.NodeName
 	}
 
+	// Apply the RuntimeSelection LAST so the dispatcher's MutatePod sees the
+	// fully-assembled pod (per task-12 requirement: option applied last in pipeline).
+	if opts.RuntimeSelection != nil {
+		if err := applyRuntimeSelection(pod, opts.RuntimeSelection, sb); err != nil {
+			return nil, fmt.Errorf("podspec: apply runtime selection: %w", err)
+		}
+	}
+
 	return pod, nil
+}
+
+// applyRuntimeSelection applies the dispatcher-derived fields to pod:
+//  1. RuntimeClassName is already set above (before MutatePod needs it).
+//  2. NodeAffinity terms from the dispatcher are MERGED into any existing
+//     required affinity terms — not replaced — so caller-provided affinity
+//     is preserved.
+//  3. Overhead from the dispatcher is set when non-empty.
+//  4. MutatePod is called last so dispatchers can see (and depend on) any
+//     of the above values.
+//
+// The params map is extracted from sandbox.Spec if SandboxClass runtime.Params
+// were set; since the builder does not have access to the SandboxClass we
+// pass nil here — callers that need param propagation should invoke
+// sel.Dispatcher.MutatePod directly after BuildWithOptions.
+func applyRuntimeSelection(pod *corev1.Pod, sel *runtimepkg.Selection, sb *setecv1alpha1.Sandbox) error {
+	// Merge NodeAffinity required terms.
+	dispatcherAffinity := sel.Dispatcher.NodeAffinity()
+	if dispatcherAffinity != nil &&
+		dispatcherAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+		if pod.Spec.Affinity == nil {
+			pod.Spec.Affinity = &corev1.Affinity{}
+		}
+		if pod.Spec.Affinity.NodeAffinity == nil {
+			pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+		}
+		if pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+			pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{}
+		}
+		// Merge: append dispatcher terms to any existing terms (do not replace).
+		pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms = append(
+			pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms,
+			dispatcherAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms...,
+		)
+	}
+
+	// Set Overhead when the dispatcher provides it.  Note: Kubernetes validates
+	// that Pod.Spec.Overhead exactly matches the RuntimeClass's overhead field.
+	// The RuntimeClass must therefore already declare the same overhead values.
+	// In clusters where the RuntimeClass does not define overhead (e.g. dev
+	// envtest environments), callers should pass an empty BackendConfig.DefaultOverhead
+	// so the dispatcher returns nil here.
+	if overhead := sel.Dispatcher.Overhead(); len(overhead) > 0 {
+		pod.Spec.Overhead = overhead.DeepCopy()
+	}
+
+	// MutatePod is called last. The params map is nil here because the builder
+	// does not carry SandboxClass.Spec.Runtime.Params; callers needing param
+	// propagation should set them via a post-build MutatePod call or by passing
+	// them through a future BuildOptions extension.
+	if err := sel.Dispatcher.MutatePod(pod, nil); err != nil {
+		return fmt.Errorf("dispatcher %q MutatePod: %w", sel.Backend, err)
+	}
+
+	return nil
+}
+
+// WithRuntimeSelection returns a BuildOptions with RuntimeSelection set to sel.
+// It is a convenience constructor for callers that use the functional-option
+// style; callers that already have a BuildOptions struct may set the field directly.
+func WithRuntimeSelection(sel *runtimepkg.Selection) BuildOptions {
+	return BuildOptions{RuntimeSelection: sel}
 }
 
 // validate performs the structural checks that the OpenAPI schema cannot

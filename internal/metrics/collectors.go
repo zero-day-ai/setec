@@ -21,11 +21,16 @@ limitations under the License.
 // reaching into global state.
 //
 // Label cardinality note: every metric uses a fixed label set
-// (tenant, sandbox_class, phase, vmm). "tenant" is always the empty string
-// in single-tenant mode to avoid the Prometheus anti-pattern of sometimes-
-// present labels. Cardinality therefore scales with (tenants x classes x
-// phases) = O(small) for typical deployments. Do NOT add high-cardinality
-// labels such as Sandbox name or UID without a compelling reason.
+// (tenant, sandbox_class, phase, vmm, runtime). "tenant" is always the
+// empty string in single-tenant mode to avoid the Prometheus anti-pattern
+// of sometimes-present labels. Cardinality therefore scales with
+// (tenants x classes x phases) = O(small) for typical deployments.
+// Do NOT add high-cardinality labels such as Sandbox name or UID without a
+// compelling reason.
+//
+// Runtime values are bounded: "firecracker", "kata", "gvisor", "native".
+// Backend/reason values for probe-error metrics are also bounded — see
+// IncNodeProbeError for the enumerated reason values.
 package metrics
 
 import (
@@ -44,7 +49,14 @@ const (
 	LabelTenant       = "tenant"
 	LabelSandboxClass = "sandbox_class"
 	LabelPhase        = "phase"
-	LabelVMM          = "vmm"
+	// Deprecated: LabelVMM is superseded by LabelRuntime. It is retained for
+	// one release to preserve backward compatibility with existing dashboards
+	// and will be removed in the next spec iteration. Use LabelRuntime for
+	// all new code.
+	LabelVMM = "vmm"
+	// LabelRuntime is the canonical replacement for LabelVMM. Bounded values:
+	// "firecracker", "kata", "gvisor", "native".
+	LabelRuntime = "runtime"
 	// LabelOperation is the Phase 3 snapshot operation label:
 	// "create", "restore", "delete", "pause", "resume".
 	LabelOperation = "operation"
@@ -53,7 +65,7 @@ const (
 	LabelNode = "node"
 )
 
-// Collectors bundles the four Phase 2 metrics. Callers receive this via
+// Collectors bundles the Phase 2+ metrics. Callers receive this via
 // the reconciler's constructor; do not embed a *Collectors pointer into
 // globals.
 type Collectors struct {
@@ -67,8 +79,9 @@ type Collectors struct {
 	SandboxDuration *prometheus.HistogramVec
 
 	// SandboxColdStart observes the time from Sandbox creation to the
-	// moment its Pod transitioned to Running. VMM and class are the
-	// useful breakdowns because they surface microVM-level boot cost.
+	// moment its Pod transitioned to Running. Both runtime and vmm labels
+	// are present during the dual-write transition period so existing
+	// dashboards keep working.
 	SandboxColdStart *prometheus.HistogramVec
 
 	// SandboxActive gauges the current number of active Sandboxes per
@@ -85,6 +98,26 @@ type Collectors struct {
 	// the node-agent pool manager and exposed via the node-agent
 	// metrics endpoint. Phase 3 only.
 	PoolFill *prometheus.GaugeVec
+
+	// FallbackTotal counts runtime fallback events. Labels:
+	//   from — the runtime that was attempted (bounded: see LabelRuntime)
+	//   to   — the runtime that was substituted (bounded: see LabelRuntime)
+	FallbackTotal *prometheus.CounterVec
+
+	// NodeRuntimeAvailable gauges whether a given runtime is available on
+	// the node (1 = available, 0 = unavailable). Label: runtime (bounded).
+	NodeRuntimeAvailable *prometheus.GaugeVec
+
+	// NodeRuntimeProbeErrors counts probe failures per backend and reason.
+	// Labels:
+	//   backend — runtime backend being probed (bounded: see LabelRuntime)
+	//   reason  — failure category; bounded values:
+	//               "binary_missing"    — executable not found on node
+	//               "exec_failed"       — binary present but execution failed
+	//               "timeout"           — probe did not complete within deadline
+	//               "permission_denied" — insufficient privilege to run probe
+	//               "unknown"           — uncategorised error (catch-all)
+	NodeRuntimeProbeErrors *prometheus.CounterVec
 }
 
 // NewCollectors constructs a fresh Collectors bundle and registers every
@@ -117,13 +150,15 @@ func NewCollectorsWith(reg prometheus.Registerer) *Collectors {
 			},
 			[]string{LabelPhase, LabelTenant, LabelSandboxClass},
 		),
+		// Dual-write transition: both "runtime" (new canonical label) and
+		// "vmm" (deprecated) are present until the next spec removes vmm.
 		SandboxColdStart: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "setec_sandbox_cold_start_seconds",
 				Help:    "Time (s) from Sandbox creation to Pod Running.",
 				Buckets: prometheus.ExponentialBuckets(0.1, 2, 12),
 			},
-			[]string{LabelVMM, LabelSandboxClass},
+			[]string{LabelRuntime, LabelVMM, LabelSandboxClass},
 		),
 		SandboxActive: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -147,12 +182,34 @@ func NewCollectorsWith(reg prometheus.Registerer) *Collectors {
 			},
 			[]string{LabelNode, LabelSandboxClass},
 		),
+		FallbackTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "setec_sandbox_fallback_total",
+				Help: "Total number of runtime fallback events (from one backend to another).",
+			},
+			[]string{"from", "to"},
+		),
+		NodeRuntimeAvailable: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "setec_node_runtime_available",
+				Help: "Whether a runtime backend is available on this node (1 = available, 0 = unavailable).",
+			},
+			[]string{LabelRuntime},
+		),
+		NodeRuntimeProbeErrors: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "setec_node_runtime_probe_errors_total",
+				Help: "Total number of runtime probe errors. See label 'reason' for bounded failure categories.",
+			},
+			[]string{"backend", "reason"},
+		),
 	}
 
 	if reg != nil {
 		reg.MustRegister(
 			c.SandboxTotal, c.SandboxDuration, c.SandboxColdStart, c.SandboxActive,
 			c.SnapshotDuration, c.PoolFill,
+			c.FallbackTotal, c.NodeRuntimeAvailable, c.NodeRuntimeProbeErrors,
 		)
 	}
 
@@ -189,11 +246,29 @@ func (c *Collectors) RecordDuration(tenant, class, phase string, d time.Duration
 // RecordColdStart observes a Sandbox's time-to-Running into the cold-start
 // histogram. vmm is the SandboxClass.spec.vmm value (or the operator's
 // default) and class is the SandboxClass name (or empty string).
+//
+// Deprecated: use ObserveColdStart which carries both the new runtime label
+// and the legacy vmm label. RecordColdStart duplicates the vmm value into
+// the runtime label to maintain backward compatibility during the transition.
 func (c *Collectors) RecordColdStart(vmm, class string, d time.Duration) {
 	if c == nil {
 		return
 	}
-	c.SandboxColdStart.WithLabelValues(vmm, class).Observe(d.Seconds())
+	// Dual-write: runtime receives the same value as vmm so existing callers
+	// continue working without change. New callers should use ObserveColdStart.
+	c.SandboxColdStart.WithLabelValues(vmm, vmm, class).Observe(d.Seconds())
+}
+
+// ObserveColdStart observes a Sandbox's time-to-Running into the cold-start
+// histogram with explicit runtime and vmm labels for the dual-write period.
+// runtime is the canonical label (bounded: "firecracker", "kata", "gvisor",
+// "native"). vmm is the legacy label value kept for dashboard compatibility.
+// Pass the same string for both if only one is known.
+func (c *Collectors) ObserveColdStart(runtime, vmm, class string, d time.Duration) {
+	if c == nil {
+		return
+	}
+	c.SandboxColdStart.WithLabelValues(runtime, vmm, class).Observe(d.Seconds())
 }
 
 // SetActive adjusts the active-sandbox gauge by delta (positive on
@@ -225,4 +300,43 @@ func (c *Collectors) SetPoolFill(node, class string, entries int) {
 		return
 	}
 	c.PoolFill.WithLabelValues(node, class).Set(float64(entries))
+}
+
+// IncFallback increments FallbackTotal for the given from/to runtime pair.
+// Both from and to must be bounded runtime values: "firecracker", "kata",
+// "gvisor", "native".
+func (c *Collectors) IncFallback(from, to string) {
+	if c == nil {
+		return
+	}
+	c.FallbackTotal.WithLabelValues(from, to).Inc()
+}
+
+// SetNodeRuntimeAvailable sets the NodeRuntimeAvailable gauge for the given
+// runtime to 1 (available) or 0 (unavailable). runtime must be a bounded
+// value: "firecracker", "kata", "gvisor", "native".
+func (c *Collectors) SetNodeRuntimeAvailable(runtime string, available bool) {
+	if c == nil {
+		return
+	}
+	v := 0.0
+	if available {
+		v = 1.0
+	}
+	c.NodeRuntimeAvailable.WithLabelValues(runtime).Set(v)
+}
+
+// IncNodeProbeError increments NodeRuntimeProbeErrors for the given backend
+// and reason. backend is a bounded runtime value; reason must be one of:
+//
+//	"binary_missing"    — executable not found on node
+//	"exec_failed"       — binary present but execution failed
+//	"timeout"           — probe did not complete within deadline
+//	"permission_denied" — insufficient privilege to run probe
+//	"unknown"           — uncategorised error (catch-all)
+func (c *Collectors) IncNodeProbeError(backend, reason string) {
+	if c == nil {
+		return
+	}
+	c.NodeRuntimeProbeErrors.WithLabelValues(backend, reason).Inc()
 }

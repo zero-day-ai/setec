@@ -55,6 +55,7 @@ import (
 	"github.com/zero-day-ai/setec/internal/controller"
 	"github.com/zero-day-ai/setec/internal/metrics"
 	"github.com/zero-day-ai/setec/internal/prereq"
+	runtimepkg "github.com/zero-day-ai/setec/internal/runtime"
 	"github.com/zero-day-ai/setec/internal/snapshot"
 	"github.com/zero-day-ai/setec/internal/tracing"
 	"github.com/zero-day-ai/setec/internal/webhook"
@@ -107,6 +108,7 @@ func main() {
 		probeBindAddr       string
 		enableLeaderElect   bool
 		runtimeClassName    string
+		runtimesConfig      string
 		nodeSelectorLabel   string
 		multiTenancyEnabled bool
 		tenantLabelKey      string
@@ -132,8 +134,12 @@ func main() {
 	pflag.BoolVar(&enableLeaderElect, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	pflag.StringVar(&runtimesConfig, "runtimes-config", "",
+		"Path to a YAML file describing enabled runtime backends (runtimes block). "+
+			"When set, --runtime-class-name is ignored. See charts/setec/templates/configmap-runtimes.yaml for the schema.")
 	pflag.StringVar(&runtimeClassName, "runtime-class-name", "kata-fc",
-		"Name of the Kata RuntimeClass the Sandbox Pods will reference.")
+		"Deprecated: use --runtimes-config instead. Name of the Kata RuntimeClass the Sandbox Pods will reference. "+
+			"When --runtimes-config is absent, this flag synthesizes a kata-fc-only RuntimeConfig.")
 	pflag.StringVar(&nodeSelectorLabel, "node-selector-label", "katacontainers.io/kata-runtime",
 		"Label key Nodes must carry to be considered Kata-capable. "+
 			"Used by the startup prerequisite check only; scheduling uses the RuntimeClass.")
@@ -179,6 +185,64 @@ func main() {
 	pflag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
+
+	// --- Runtime backend configuration ---
+	//
+	// When --runtimes-config is provided, load the full multi-backend config.
+	// When only the legacy --runtime-class-name is set (no --runtimes-config),
+	// synthesize a minimal config that enables only kata-fc. This preserves
+	// full backward compatibility for existing deployments (REQ-6.1).
+	var (
+		runtimeCfg      *runtimepkg.RuntimeConfig
+		runtimeRegistry *runtimepkg.Registry
+	)
+	if runtimesConfig != "" {
+		var err error
+		runtimeCfg, err = runtimepkg.LoadFromFile(runtimesConfig)
+		if err != nil {
+			setupLog.Error(err, "unable to load runtimes config", "path", runtimesConfig)
+			os.Exit(1)
+		}
+	} else {
+		// Legacy path: synthesize a kata-fc-only config from --runtime-class-name.
+		setupLog.Info("DEPRECATION WARNING: --runtimes-config is not set; "+
+			"falling back to legacy --runtime-class-name flag. "+
+			"Please migrate to --runtimes-config for multi-backend support.",
+			"runtime-class-name", runtimeClassName,
+		)
+		runtimeCfg = &runtimepkg.RuntimeConfig{
+			Runtimes: map[string]runtimepkg.BackendConfig{
+				runtimepkg.BackendKataFC: {
+					Enabled:          true,
+					RuntimeClassName: runtimeClassName,
+				},
+			},
+			Defaults: runtimepkg.DefaultsConfig{
+				Runtime: runtimepkg.RuntimeDefaults{
+					Backend: runtimepkg.BackendKataFC,
+				},
+			},
+		}
+	}
+
+	// Build the dispatcher Registry and register one Dispatcher per enabled backend.
+	runtimeRegistry = runtimepkg.NewRegistry()
+	for _, backend := range runtimeCfg.EnabledBackends() {
+		bc := runtimeCfg.Runtimes[backend]
+		switch backend {
+		case runtimepkg.BackendKataFC:
+			runtimeRegistry.Register(runtimepkg.NewKataFCDispatcher(bc))
+		case runtimepkg.BackendKataQEMU:
+			runtimeRegistry.Register(runtimepkg.NewKataQEMUDispatcher(bc))
+		case runtimepkg.BackendGVisor:
+			runtimeRegistry.Register(runtimepkg.NewGVisorDispatcher(bc))
+		case runtimepkg.BackendRunc:
+			runtimeRegistry.Register(runtimepkg.NewRuncDispatcher(bc))
+		default:
+			setupLog.Info("unknown backend in runtimes config; skipping", "backend", backend)
+		}
+	}
+	setupLog.Info("runtime registry built", "enabled", runtimeRegistry.EnabledBackends())
 
 	restCfg := ctrl.GetConfigOrDie()
 
@@ -256,8 +320,9 @@ func main() {
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
 		Recorder:            mgr.GetEventRecorderFor("sandbox-controller"),
-		RuntimeClassName:    runtimeClassName,
 		NodeSelectorLabel:   nodeSelectorLabel,
+		Runtimes:            runtimeRegistry,
+		RuntimeCfg:          runtimeCfg,
 		ClassResolver:       resolver,
 		MetricsCollector:    collectors,
 		Tracer:              tracer,
@@ -311,6 +376,17 @@ func main() {
 				os.Exit(1)
 			}
 		}
+		// Runtime backends: SandboxClass defaulting + validating webhook.
+		// RuntimeCfg is guaranteed non-nil here — the operator would have
+		// exited above if LoadFromFile or the synthetic config failed.
+		scWebhook := &webhook.SandboxClassWebhook{
+			Client:     mgr.GetClient(),
+			RuntimeCfg: runtimeCfg,
+		}
+		if err := scWebhook.SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up SandboxClass webhook")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 
@@ -320,7 +396,7 @@ func main() {
 	// and never errors; missing prerequisites are cluster-configuration
 	// issues, not operator failures.
 	state := &readyzState{}
-	go runStartupPrereqCheck(restCfg, runtimeClassName, nodeSelectorLabel, state)
+	go runStartupPrereqCheck(restCfg, runtimeCfg, nodeSelectorLabel, state)
 
 	// Serve /healthz and /readyz on the probe bind address as a
 	// manager-managed Runnable so the listener shares the manager's
@@ -334,7 +410,8 @@ func main() {
 		"metrics-bind-address", metricsBindAddr,
 		"health-probe-bind-address", probeBindAddr,
 		"leader-elect", enableLeaderElect,
-		"runtime-class-name", runtimeClassName,
+		"runtimes-config", runtimesConfig,
+		"enabled-backends", runtimeRegistry.EnabledBackends(),
 		"node-selector-label", nodeSelectorLabel,
 	)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
@@ -351,7 +428,7 @@ func main() {
 // problem to the cluster administrator via Events, not to crash-loop.
 func runStartupPrereqCheck(
 	cfg *rest.Config,
-	runtimeClassName string,
+	runtimeCfg *runtimepkg.RuntimeConfig,
 	nodeSelectorLabel string,
 	state *readyzState,
 ) {
@@ -370,7 +447,15 @@ func runStartupPrereqCheck(
 		return
 	}
 
-	result, err := prereq.Check(ctx, c, runtimeClassName, nodeSelectorLabel)
+	// Build the per-backend class-name map for the multi-backend prereq check.
+	classNames := make(map[string]string, len(runtimeCfg.Runtimes))
+	for name, bc := range runtimeCfg.Runtimes {
+		if bc.Enabled {
+			classNames[name] = bc.RuntimeClassName
+		}
+	}
+
+	result, err := prereq.CheckMulti(ctx, c, runtimeCfg.EnabledBackends(), classNames, nodeSelectorLabel)
 	if err != nil {
 		setupLog.Info("startup prerequisite check encountered an API error",
 			"error", err.Error(),

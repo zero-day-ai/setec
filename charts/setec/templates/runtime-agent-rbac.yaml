@@ -1,0 +1,54 @@
+{{- if ne (.Values.defaults.runtime.nodeCapabilitiesMode | default "probe") "static" -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "setec.fullname" . }}-runtime-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "setec.fullname" . }}-runtime-agent
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime-agent
+rules:
+  # The runtime-agent reads the node it runs on and writes the
+  # setec.zero-day.ai/runtime.<backend>=true|false labels.
+  #
+  # Note: RBAC cannot restrict WHICH labels a client may set on nodes —
+  # label scoping is not representable in the RBAC policy language.
+  # The agent is trusted to only touch its own setec.zero-day.ai/runtime.*
+  # label prefix; see internal/nodeagent/labels.go for the strategic-merge
+  # patch that enforces this in code.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Update the SetecRuntimes condition on node.status.
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch", "update"]
+  # Emit events on nodes for probe failures.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "setec.fullname" . }}-runtime-agent
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "setec.fullname" . }}-runtime-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "setec.fullname" . }}-runtime-agent
+    namespace: {{ .Values.namespace }}
+{{- end }}

@@ -36,21 +36,59 @@ const (
 	VMMCloudHypervisor VMM = "cloud-hypervisor"
 )
 
+// SandboxClassRuntime selects the isolation backend for Sandboxes in this
+// class and optionally declares an ordered fallback chain. When Runtime is
+// nil the operator infers a backend from the legacy VMM field; when that is
+// also unset the cluster-default backend from Helm values is used.
+// +kubebuilder:validation:Optional
+type SandboxClassRuntime struct {
+	// Backend is the isolation runtime to use for Sandboxes in this class.
+	// Must be one of the four supported backends. When unset the operator
+	// falls back to the cluster default declared in Helm values.
+	// +kubebuilder:validation:Enum=kata-fc;kata-qemu;gvisor;runc
+	// +optional
+	Backend string `json:"backend,omitempty"`
+
+	// Params is a map of backend-specific tuning parameters forwarded to the
+	// RuntimeDispatcher. Keys and semantics vary per backend (e.g.
+	// params.vcpus, params.memory for kata-qemu). Unknown keys are ignored
+	// by backends that do not understand them.
+	// +optional
+	Params map[string]string `json:"params,omitempty"`
+
+	// Fallback is an ordered list of backend names to attempt when no node
+	// advertises the requested Backend. Each entry must be one of the four
+	// supported values. The operator tries each in order; the first backend
+	// with a capable node wins. status.runtime.chosen records the final
+	// selection. When empty and the primary backend is unavailable, the
+	// Sandbox transitions to Failed with reason NoEligibleNode.
+	// +optional
+	Fallback []string `json:"fallback,omitempty"`
+}
+
 // SandboxClassSpec defines the constraints and defaults a cluster
 // administrator publishes for tenant-facing Sandboxes. Tenants reference a
 // SandboxClass by name in Sandbox.spec.sandboxClassName (added to
 // SandboxSpec in a later task) and the operator enforces that the requested
 // Sandbox fits within the class.
 type SandboxClassSpec struct {
+	// Deprecated: use Runtime.Backend instead.
 	// VMM selects the virtual machine monitor targeted by this class.
 	// +required
 	VMM VMM `json:"vmm"`
 
+	// Deprecated: use Runtime.Backend instead.
 	// RuntimeClassName optionally overrides the operator-wide default
 	// RuntimeClass name (e.g. "kata-fc", "kata-qemu"). When empty the
 	// controller falls back to its --runtime-class-name flag.
 	// +optional
 	RuntimeClassName string `json:"runtimeClassName,omitempty"`
+
+	// Runtime selects the isolation backend and optional fallback chain for
+	// Sandboxes in this class. When nil the operator infers the backend from
+	// the legacy VMM field for backwards compatibility.
+	// +optional
+	Runtime *SandboxClassRuntime `json:"runtime,omitempty"`
 
 	// KernelImage is an optional OCI reference to a custom guest kernel
 	// image the node agent pre-pulls and hands to Kata. Empty means the

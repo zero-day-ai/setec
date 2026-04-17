@@ -1,0 +1,115 @@
+{{- if ne (.Values.defaults.runtime.nodeCapabilitiesMode | default "probe") "static" -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "setec.fullname" . }}-runtime-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "setec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime-agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "setec.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: runtime-agent
+  template:
+    metadata:
+      labels:
+        {{- include "setec.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: runtime-agent
+    spec:
+      serviceAccountName: {{ include "setec.fullname" . }}-runtime-agent
+      hostPID: false
+      hostNetwork: false
+      # Tolerate every taint: the runtime-agent must run on every node so
+      # the operator has a capability view of the full cluster. Using
+      # {operator: Exists} matches all taints.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: runtime-agent
+          image: "{{ .Values.runtimeAgent.image.repository }}:{{ .Values.runtimeAgent.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.runtimeAgent.image.pullPolicy }}
+          args:
+            - --runtimes-config=/etc/setec/runtimes.yaml
+            - --node-name=$(NODE_NAME)
+            - --metrics-addr=:{{ .Values.runtimeAgent.metricsPort }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.runtimeAgent.metricsPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.runtimeAgent.resources | nindent 12 }}
+          securityContext:
+            # Host mounts are read-only but we still drop every capability
+            # we don't need. The probes do not require elevated privileges.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: runtimes-config
+              mountPath: /etc/setec/runtimes.yaml
+              subPath: runtimes.yaml
+              readOnly: true
+            - name: host-dev
+              mountPath: /host/dev
+              readOnly: true
+            - name: host-sys-module
+              mountPath: /host/sys/module
+              readOnly: true
+            - name: host-usr-bin
+              mountPath: /host/usr/bin
+              readOnly: true
+            {{- if .Values.runtimeAgent.mountContainerdConfig }}
+            - name: host-etc-containerd
+              mountPath: /host/etc/containerd
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: runtimes-config
+          configMap:
+            name: {{ include "setec.fullname" . }}-runtimes
+            items:
+              - key: runtimes.yaml
+                path: runtimes.yaml
+        - name: host-dev
+          hostPath:
+            path: /dev
+        - name: host-sys-module
+          hostPath:
+            path: /sys/module
+        - name: host-usr-bin
+          hostPath:
+            path: /usr/bin
+        {{- if .Values.runtimeAgent.mountContainerdConfig }}
+        - name: host-etc-containerd
+          hostPath:
+            path: /etc/containerd
+            type: DirectoryOrCreate
+        {{- end }}
+      terminationGracePeriodSeconds: 10
+{{- end }}

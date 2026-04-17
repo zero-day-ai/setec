@@ -56,6 +56,7 @@ import (
 	setecv1alpha1 "github.com/zero-day-ai/setec/api/v1alpha1"
 	classpkg "github.com/zero-day-ai/setec/internal/class"
 	metricspkg "github.com/zero-day-ai/setec/internal/metrics"
+	runtimepkg "github.com/zero-day-ai/setec/internal/runtime"
 	snapshotpkg "github.com/zero-day-ai/setec/internal/snapshot"
 )
 
@@ -68,7 +69,7 @@ var (
 	testCtx    context.Context
 	testCancel context.CancelFunc
 
-	// testRuntimeClassName matches the value passed to SandboxReconciler.
+	// testRuntimeClassName matches the RuntimeClass installed by ensurePrereqs.
 	// Centralized here so the no-RuntimeClass scenario can delete precisely
 	// the object the controller is watching.
 	testRuntimeClassName = "kata-fc"
@@ -78,6 +79,11 @@ var (
 	// this label so scenarios do not trip the "no Kata-capable Nodes"
 	// warning path.
 	testNodeSelectorLabel = "katacontainers.io/kata-runtime"
+
+	// testRuntimeRegistry and testRuntimeCfg are the multi-backend
+	// dispatcher registry and config wired to the SandboxReconciler.
+	testRuntimeRegistry *runtimepkg.Registry
+	testRuntimeCfg      *runtimepkg.RuntimeConfig
 
 	// Phase 2 dependencies that scenarios may inspect directly.
 	testClassResolver   *classpkg.Resolver
@@ -215,6 +221,32 @@ func TestMain(m *testing.M) {
 	testCollectors = metricspkg.NewCollectorsWith(testMetricsRegistry)
 	testClassResolver = classpkg.NewResolver(mgr.GetClient())
 
+	// Build the runtime registry and config for the multi-backend path.
+	// The test suite uses a kata-fc-only config to match the existing prereq
+	// setup (one kata-fc RuntimeClass + one node with testNodeSelectorLabel).
+	testRuntimeCfg = &runtimepkg.RuntimeConfig{
+		Runtimes: map[string]runtimepkg.BackendConfig{
+			runtimepkg.BackendKataFC: {
+				Enabled:          true,
+				RuntimeClassName: testRuntimeClassName,
+				// DefaultOverhead is explicitly empty so the kata-fc dispatcher
+				// returns nil overhead. envtest RuntimeClass objects do not
+				// define overhead, and Kubernetes rejects pods with non-nil
+				// Overhead that doesn't match the RuntimeClass overhead field.
+				DefaultOverhead: corev1.ResourceList{},
+			},
+		},
+		Defaults: runtimepkg.DefaultsConfig{
+			Runtime: runtimepkg.RuntimeDefaults{
+				Backend: runtimepkg.BackendKataFC,
+			},
+		},
+	}
+	testRuntimeRegistry = runtimepkg.NewRegistry()
+	testRuntimeRegistry.Register(runtimepkg.NewKataFCDispatcher(
+		testRuntimeCfg.Runtimes[runtimepkg.BackendKataFC],
+	))
+
 	// Phase 3 wiring: a package-wide fake dialer lets each scenario
 	// script node-agent responses per its needs without touching the
 	// reconciler itself.
@@ -230,8 +262,9 @@ func TestMain(m *testing.M) {
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		Recorder:          mgr.GetEventRecorderFor("sandbox-controller"),
-		RuntimeClassName:  testRuntimeClassName,
 		NodeSelectorLabel: testNodeSelectorLabel,
+		Runtimes:          testRuntimeRegistry,
+		RuntimeCfg:        testRuntimeCfg,
 		// Phase 2 dependencies wired so the envtest reconciler exercises
 		// the full Phase 2 flow. Each dependency is nil-safe so Phase 1
 		// scenarios continue to pass unchanged.
@@ -319,6 +352,10 @@ func TestMain(m *testing.M) {
 // the controller's prereq check succeeds. Envtest has no real Nodes, so we
 // create one imperatively; the scheduler is not running so the Node will
 // never actually be "ready", but prereq.Check only inspects labels.
+//
+// The Node carries both the legacy katacontainers.io/kata-runtime label
+// (for backward compatibility) and the new setec.zero-day.ai/runtime.kata-fc
+// label (for the multi-backend prereq check and selectRuntime).
 func ensurePrereqs(ctx context.Context, c client.Client) error {
 	rc := &nodev1.RuntimeClass{
 		ObjectMeta: metav1.ObjectMeta{Name: testRuntimeClassName},
@@ -330,8 +367,11 @@ func ensurePrereqs(ctx context.Context, c client.Client) error {
 
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   "kata-node-1",
-			Labels: map[string]string{testNodeSelectorLabel: "true"},
+			Name: "kata-node-1",
+			Labels: map[string]string{
+				testNodeSelectorLabel:               "true",
+				"setec.zero-day.ai/runtime.kata-fc": "true",
+			},
 		},
 	}
 	if err := c.Create(ctx, node); err != nil && !apierrors.IsAlreadyExists(err) {

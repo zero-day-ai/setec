@@ -270,3 +270,169 @@ func TestCheck_NodeListError(t *testing.T) {
 		t.Errorf("RuntimeClassPresent should be true even when List errored, got %v", got.RuntimeClassPresent)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CheckMulti tests (task 11)
+// ---------------------------------------------------------------------------
+
+// TestCheckMulti_AllEnabledAllLabelled verifies that CheckMulti returns
+// RuntimeClassPresent=true and KataCapableNodes=true when every enabled
+// backend has a RuntimeClass and at least one Node with the backend label.
+func TestCheckMulti_AllEnabledAllLabelled(t *testing.T) {
+	t.Parallel()
+
+	enabled := []string{"kata-fc", "gvisor"}
+	classNames := map[string]string{
+		"kata-fc": "kata-fc",
+		"gvisor":  "gvisor",
+	}
+	seed := []client.Object{
+		runtimeClassObj("kata-fc"),
+		runtimeClassObj("gvisor"),
+		nodeObj("node-kata", map[string]string{
+			"setec.zero-day.ai/runtime.kata-fc": "true",
+		}),
+		nodeObj("node-gvisor", map[string]string{
+			"setec.zero-day.ai/runtime.gvisor": "true",
+		}),
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(seed...).Build()
+
+	got, err := CheckMulti(context.Background(), c, enabled, classNames, testNodeLabel)
+	if err != nil {
+		t.Fatalf("CheckMulti returned error: %v", err)
+	}
+	if !got.RuntimeClassPresent {
+		t.Errorf("RuntimeClassPresent = false, want true; warnings=%q", got.Warnings)
+	}
+	if !got.KataCapableNodes {
+		t.Errorf("KataCapableNodes = false, want true")
+	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %q", got.Warnings)
+	}
+}
+
+// TestCheckMulti_OneEnabledNoCapableNodes verifies that CheckMulti emits a
+// warning for the backend with no capable nodes but does not return an error.
+func TestCheckMulti_OneEnabledNoCapableNodes(t *testing.T) {
+	t.Parallel()
+
+	enabled := []string{"kata-fc", "gvisor"}
+	classNames := map[string]string{
+		"kata-fc": "kata-fc",
+		"gvisor":  "gvisor",
+	}
+	// gvisor RuntimeClass is present but no node carries its label.
+	seed := []client.Object{
+		runtimeClassObj("kata-fc"),
+		runtimeClassObj("gvisor"),
+		nodeObj("node-kata", map[string]string{
+			"setec.zero-day.ai/runtime.kata-fc": "true",
+		}),
+		// No node with setec.zero-day.ai/runtime.gvisor=true.
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(seed...).Build()
+
+	got, err := CheckMulti(context.Background(), c, enabled, classNames, testNodeLabel)
+	if err != nil {
+		t.Fatalf("CheckMulti returned error: %v", err)
+	}
+	// RuntimeClass present for both backends.
+	if !got.RuntimeClassPresent {
+		t.Errorf("RuntimeClassPresent = false, want true")
+	}
+	// At least one node has kata-fc.
+	if !got.KataCapableNodes {
+		t.Errorf("KataCapableNodes = false, want true")
+	}
+	// Warning emitted for the backend with no capable nodes.
+	if len(got.Warnings) == 0 {
+		t.Fatal("expected at least one warning for gvisor with no capable nodes")
+	}
+	if !strings.Contains(got.Warnings[0], "gvisor") {
+		t.Errorf("expected gvisor in warning, got %q", got.Warnings[0])
+	}
+}
+
+// TestCheckMulti_DisabledBackendSkipped verifies that a backend NOT in the
+// enabled list is completely skipped — no Get/List call is made for it and
+// no warning is emitted.
+func TestCheckMulti_DisabledBackendSkipped(t *testing.T) {
+	t.Parallel()
+
+	// Only kata-fc is enabled; runc is not.
+	enabled := []string{"kata-fc"}
+	classNames := map[string]string{
+		"kata-fc": "kata-fc",
+		// runc deliberately absent from classNames.
+	}
+	seed := []client.Object{
+		runtimeClassObj("kata-fc"),
+		nodeObj("node-kata", map[string]string{
+			// Both the new-style setec label and the legacy kata label are
+			// present so the delegate call to Check can find the node.
+			"setec.zero-day.ai/runtime.kata-fc": "true",
+			testNodeLabel:                        "true",
+		}),
+		// No runc RuntimeClass; if CheckMulti tried to Get it, the test
+		// would still not fail (NotFound is tolerated), but we verify no
+		// warning is emitted for runc.
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(seed...).Build()
+
+	got, err := CheckMulti(context.Background(), c, enabled, classNames, testNodeLabel)
+	if err != nil {
+		t.Fatalf("CheckMulti returned error: %v", err)
+	}
+	if !got.RuntimeClassPresent {
+		t.Errorf("RuntimeClassPresent = false, want true; warnings=%q", got.Warnings)
+	}
+	if !got.KataCapableNodes {
+		t.Errorf("KataCapableNodes = false, want true")
+	}
+	// No warnings expected since kata-fc is fully satisfied and runc is not enabled.
+	if len(got.Warnings) != 0 {
+		t.Errorf("unexpected warnings (disabled backend should not produce warnings): %q", got.Warnings)
+	}
+}
+
+// TestCheckMulti_SingleKataFCDelegates verifies that CheckMulti with only
+// kata-fc enabled delegates to Check and produces identical output (smoke-
+// test compatibility requirement from task-11).
+func TestCheckMulti_SingleKataFCDelegates(t *testing.T) {
+	t.Parallel()
+
+	enabled := []string{"kata-fc"}
+	classNames := map[string]string{"kata-fc": testRuntimeClass}
+	seed := []client.Object{
+		runtimeClassObj(testRuntimeClass),
+		// Both labels for full compatibility.
+		nodeObj("node-kata", map[string]string{
+			testNodeLabel:                        "true",
+			"setec.zero-day.ai/runtime.kata-fc": "true",
+		}),
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(seed...).Build()
+
+	// CheckMulti result.
+	multi, err := CheckMulti(context.Background(), c, enabled, classNames, testNodeLabel)
+	if err != nil {
+		t.Fatalf("CheckMulti: %v", err)
+	}
+	// Single-backend Check result.
+	single, err := Check(context.Background(), c, testRuntimeClass, testNodeLabel)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	if multi.RuntimeClassPresent != single.RuntimeClassPresent {
+		t.Errorf("RuntimeClassPresent: multi=%v single=%v", multi.RuntimeClassPresent, single.RuntimeClassPresent)
+	}
+	if multi.KataCapableNodes != single.KataCapableNodes {
+		t.Errorf("KataCapableNodes: multi=%v single=%v", multi.KataCapableNodes, single.KataCapableNodes)
+	}
+	if len(multi.Warnings) != len(single.Warnings) {
+		t.Errorf("warning count: multi=%d single=%d", len(multi.Warnings), len(single.Warnings))
+	}
+}

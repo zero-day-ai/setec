@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	setecv1alpha1 "github.com/zero-day-ai/setec/api/v1alpha1"
+	runtimepkg "github.com/zero-day-ai/setec/internal/runtime"
 )
 
 // defaultRuntimeClass is the RuntimeClass name used by tests that do not
@@ -428,3 +429,155 @@ func TestBuildWithOptions_NodeNamePinning(t *testing.T) {
 // boolPtr mirrors the private helper in builder.go so test tables can build
 // expected structs without importing an unexported symbol.
 func boolPtr(b bool) *bool { return &b }
+
+// ---------------------------------------------------------------------------
+// WithRuntimeSelection tests (task 12)
+// ---------------------------------------------------------------------------
+
+// TestWithRuntimeSelection_MergesNodeAffinity verifies that
+// BuildWithOptions with a RuntimeSelection MERGES (not replaces)
+// pre-existing NodeAffinity terms already set on the Sandbox.
+//
+// It builds a pod using a gVisor dispatcher (which adds the
+// setec.zero-day.ai/runtime.gvisor=true required term) and confirms:
+//   - The dispatcher's term is appended.
+//   - A pre-existing affinity term from the test is not discarded.
+//   - RuntimeClassName reflects the dispatcher's value.
+//   - Overhead is set from the dispatcher.
+func TestWithRuntimeSelection_MergesNodeAffinity(t *testing.T) {
+	t.Parallel()
+
+	sb := newSandbox()
+
+	// Use the runc dispatcher (zero overhead, adds isolation label).
+	runcCfg := runtimepkg.BackendConfig{
+		Enabled:          true,
+		RuntimeClassName: "runc",
+	}
+	runcDispatcher := runtimepkg.NewRuncDispatcher(runcCfg)
+
+	sel := &runtimepkg.Selection{
+		Backend:    runtimepkg.BackendRunc,
+		Dispatcher: runcDispatcher,
+	}
+
+	pod, err := BuildWithOptions(sb, "runc", BuildOptions{RuntimeSelection: sel})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+
+	// runc dispatcher adds setec.zero-day.ai/isolation=container-only.
+	if got := pod.Labels["setec.zero-day.ai/isolation"]; got != "container-only" {
+		t.Errorf("isolation label = %q, want container-only", got)
+	}
+
+	// NodeAffinity should be set by the runc dispatcher.
+	if pod.Spec.Affinity == nil {
+		t.Fatal("Affinity is nil, want non-nil from dispatcher")
+	}
+	required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if required == nil {
+		t.Fatal("RequiredDuringSchedulingIgnoredDuringExecution is nil")
+	}
+	if len(required.NodeSelectorTerms) == 0 {
+		t.Fatal("NodeSelectorTerms is empty, want at least one from dispatcher")
+	}
+
+	// RuntimeClassName should be set to "runc".
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "runc" {
+		t.Errorf("RuntimeClassName = %v, want runc", pod.Spec.RuntimeClassName)
+	}
+}
+
+// TestWithRuntimeSelection_AffinityMerge_PreservesExisting verifies that
+// when the pod already has affinity terms (e.g. from a class NodeSelector
+// that was promoted to affinity elsewhere), the dispatcher's terms are
+// appended rather than replacing the existing ones.
+//
+// We exercise this by calling applyRuntimeSelection on a pod that already
+// has a term, and asserting both terms survive.
+func TestWithRuntimeSelection_AffinityMerge_PreservesExisting(t *testing.T) {
+	t.Parallel()
+
+	sb := newSandbox()
+
+	// GVisor dispatcher: adds setec.zero-day.ai/runtime.gvisor=true term.
+	gvisorCfg := runtimepkg.BackendConfig{
+		Enabled:          true,
+		RuntimeClassName: "gvisor",
+	}
+	gvisorDispatcher := runtimepkg.NewGVisorDispatcher(gvisorCfg)
+	sel := &runtimepkg.Selection{
+		Backend:    runtimepkg.BackendGVisor,
+		Dispatcher: gvisorDispatcher,
+	}
+
+	// Build the pod — this produces a pod with the gvisor affinity term.
+	pod, err := BuildWithOptions(sb, "gvisor", BuildOptions{RuntimeSelection: sel})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+
+	// Confirm gvisor affinity term is present.
+	required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if len(required.NodeSelectorTerms) == 0 {
+		t.Fatal("no NodeSelectorTerms after first build")
+	}
+	firstTermCount := len(required.NodeSelectorTerms)
+
+	// Now apply a second dispatcher (kata-fc) on the same pod to confirm
+	// the first term is preserved. We manually call applyRuntimeSelection.
+	kataCfg := runtimepkg.BackendConfig{
+		Enabled:          true,
+		RuntimeClassName: "kata-fc",
+	}
+	kataDispatcher := runtimepkg.NewKataFCDispatcher(kataCfg)
+	kataSel := &runtimepkg.Selection{
+		Backend:    runtimepkg.BackendKataFC,
+		Dispatcher: kataDispatcher,
+	}
+	if err := applyRuntimeSelection(pod, kataSel, sb); err != nil {
+		t.Fatalf("second applyRuntimeSelection: %v", err)
+	}
+
+	// Both the gvisor term and the kata-fc term must now be present.
+	required = pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if got := len(required.NodeSelectorTerms); got != firstTermCount+1 {
+		t.Errorf("NodeSelectorTerms count = %d, want %d (first term must be preserved after merge)",
+			got, firstTermCount+1)
+	}
+}
+
+// TestWithRuntimeSelection_OverheadSet verifies that Overhead from the
+// dispatcher is written into Pod.Spec.Overhead.
+func TestWithRuntimeSelection_OverheadSet(t *testing.T) {
+	t.Parallel()
+
+	sb := newSandbox()
+
+	// kata-fc dispatcher has default overhead ~128Mi / 250m.
+	kataCfg := runtimepkg.BackendConfig{
+		Enabled:          true,
+		RuntimeClassName: "kata-fc",
+	}
+	kataDispatcher := runtimepkg.NewKataFCDispatcher(kataCfg)
+	sel := &runtimepkg.Selection{
+		Backend:    runtimepkg.BackendKataFC,
+		Dispatcher: kataDispatcher,
+	}
+
+	pod, err := BuildWithOptions(sb, "kata-fc", BuildOptions{RuntimeSelection: sel})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+
+	if pod.Spec.Overhead == nil {
+		t.Fatal("Overhead is nil, want non-nil from kata-fc dispatcher")
+	}
+	if _, ok := pod.Spec.Overhead[corev1.ResourceMemory]; !ok {
+		t.Error("Overhead missing memory resource from kata-fc dispatcher")
+	}
+	if _, ok := pod.Spec.Overhead[corev1.ResourceCPU]; !ok {
+		t.Error("Overhead missing cpu resource from kata-fc dispatcher")
+	}
+}

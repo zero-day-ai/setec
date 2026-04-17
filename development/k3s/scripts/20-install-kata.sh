@@ -186,3 +186,75 @@ if [[ ${ALREADY_INLINED} -eq 0 ]]; then
     done
     green "Phase B complete — kata runtimes registered via inline template (no drop-in, no imports)"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Register RuntimeClass kata-qemu
+#
+# kata-deploy ships both kata-fc and kata-qemu handlers. The chart creates a
+# RuntimeClass for each via a post-install Job; wait for it the same way we
+# waited for kata-fc above. Then ensure Setec's own label is present.
+#
+# Handler name: kata-qemu (as created by the kata-deploy Job — see
+#   https://github.com/kata-containers/kata-containers/blob/main/tools/packaging/kata-deploy/scripts/kata-deploy.sh)
+# ─────────────────────────────────────────────────────────────────────────────
+green "Verifying / registering RuntimeClass kata-qemu"
+
+if kubectl get runtimeclass kata-qemu >/dev/null 2>&1; then
+    yellow "RuntimeClass kata-qemu already exists (created by kata-deploy Job)"
+else
+    # kata-deploy should have created it; if not, apply a fallback definition.
+    yellow "RuntimeClass kata-qemu not found — applying fallback definition"
+    kubectl apply -f - <<'EOF'
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu
+handler: kata-qemu
+scheduling:
+  nodeSelector:
+    setec.zero-day.ai/runtime.kata-qemu: "true"
+EOF
+    green "RuntimeClass kata-qemu applied"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node labels — capability detection for the multi-runtime operator.
+#
+# Label schema: setec.zero-day.ai/runtime.<backend>=true
+#
+# The legacy katacontainers.io/kata-runtime label is preserved for compat
+# (pre-existing Setec SandboxClasses reference it until the operator upgrade
+# completes the defaulting webhook migration).
+# ─────────────────────────────────────────────────────────────────────────────
+NODE_NAME=$(kubectl get nodes -o name 2>/dev/null | head -1 | sed 's|node/||')
+if [[ -z "${NODE_NAME}" ]]; then
+    red "FAIL: could not determine node name from kubectl get nodes"
+    exit 1
+fi
+green "Node: ${NODE_NAME}"
+
+# kata-fc label (set whether or not this node has KVM — kata-fc requires KVM
+# but the RuntimeClass must still be reachable; the node-agent will set the
+# label to false on KVM-absent nodes during capability probing).
+green "Labelling node with setec.zero-day.ai/runtime.kata-fc=true"
+kubectl label node "${NODE_NAME}" \
+    "setec.zero-day.ai/runtime.kata-fc=true" \
+    --overwrite
+
+# kata-qemu label.  kata-qemu supports TCG fallback when KVM is absent, so
+# the label is always set true. Print a prominent warning when KVM is absent
+# so operators know hardware acceleration is unavailable.
+if test -c /dev/kvm; then
+    green "KVM device present — kata-qemu will use hardware acceleration"
+else
+    yellow "WARNING: /dev/kvm not found on this node."
+    yellow "         kata-qemu will fall back to TCG (software emulation)."
+    yellow "         Performance will be significantly degraded."
+    yellow "         For production use, ensure KVM is available."
+fi
+green "Labelling node with setec.zero-day.ai/runtime.kata-qemu=true"
+kubectl label node "${NODE_NAME}" \
+    "setec.zero-day.ai/runtime.kata-qemu=true" \
+    --overwrite
+
+green "kata install complete — RuntimeClasses kata-fc + kata-qemu registered, node labelled."

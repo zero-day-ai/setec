@@ -127,7 +127,7 @@ func TestPhase3_SnapshotRoundtrip(t *testing.T) {
 	}
 
 	// Wait for the restored pod to exit Completed.
-	waitForPhase(ctx, t, ns, "restored", setecv1alpha1.SandboxPhaseCompleted, 2*time.Minute)
+	waitForPhaseCtx(ctx, t, ns, "restored", setecv1alpha1.SandboxPhaseCompleted, 2*time.Minute)
 
 	// Fetch logs and assert the marker is present.
 	logs, err := exec.Command("kubectl", "-n", ns, "logs", "restored-vm").CombinedOutput()
@@ -208,7 +208,7 @@ func TestPhase3_PauseResume(t *testing.T) {
 	if err := k8sClient.Create(ctx, sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
-	waitForPhase(ctx, t, ns, sb.Name, setecv1alpha1.SandboxPhaseRunning, 2*time.Minute)
+	waitForPhaseCtx(ctx, t, ns, sb.Name, setecv1alpha1.SandboxPhaseRunning, 2*time.Minute)
 
 	// Pause.
 	got := &setecv1alpha1.Sandbox{}
@@ -219,7 +219,7 @@ func TestPhase3_PauseResume(t *testing.T) {
 	if err := k8sClient.Update(ctx, got); err != nil {
 		t.Fatalf("update paused: %v", err)
 	}
-	waitForPhase(ctx, t, ns, sb.Name, setecv1alpha1.SandboxPhasePaused, 30*time.Second)
+	waitForPhaseCtx(ctx, t, ns, sb.Name, setecv1alpha1.SandboxPhasePaused, 30*time.Second)
 
 	// Resume.
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: sb.Name}, got); err != nil {
@@ -229,7 +229,7 @@ func TestPhase3_PauseResume(t *testing.T) {
 	if err := k8sClient.Update(ctx, got); err != nil {
 		t.Fatalf("update running: %v", err)
 	}
-	waitForPhase(ctx, t, ns, sb.Name, setecv1alpha1.SandboxPhaseRunning, 30*time.Second)
+	waitForPhaseCtx(ctx, t, ns, sb.Name, setecv1alpha1.SandboxPhaseRunning, 30*time.Second)
 }
 
 // TestPhase3_PoolColdStart asserts that launching a Sandbox against a
@@ -280,9 +280,10 @@ func TestPhase3_UpgradeFromPhase2(t *testing.T) {
 	}
 }
 
-// waitForPhase polls every 2s until the Sandbox reaches the given phase
-// or the timeout elapses.
-func waitForPhase(ctx context.Context, t *testing.T, ns, name string, want setecv1alpha1.SandboxPhase, timeout time.Duration) {
+// waitForPhaseCtx polls every 2s until the Sandbox reaches the given phase
+// or the timeout elapses. It accepts an explicit context and namespace/name
+// unlike the package-level waitForPhase (which takes a client.ObjectKey).
+func waitForPhaseCtx(ctx context.Context, t *testing.T, ns, name string, want setecv1alpha1.SandboxPhase, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

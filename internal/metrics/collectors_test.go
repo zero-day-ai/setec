@@ -72,10 +72,71 @@ func TestRecordColdStart(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestCollectors(t)
 
+	// RecordColdStart (deprecated) duplicates vmm into both runtime and vmm labels.
 	c.RecordColdStart("firecracker", "standard", 3*time.Second)
 
 	if got, want := testutil.CollectAndCount(c.SandboxColdStart), 1; got != want {
 		t.Errorf("CollectAndCount = %d, want %d", got, want)
+	}
+}
+
+func TestObserveColdStart(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestCollectors(t)
+
+	// ObserveColdStart carries distinct runtime and vmm labels.
+	c.ObserveColdStart("firecracker", "firecracker", "standard", 3*time.Second)
+	c.ObserveColdStart("kata", "kata", "gpu", 5*time.Second)
+
+	if got, want := testutil.CollectAndCount(c.SandboxColdStart), 2; got != want {
+		t.Errorf("CollectAndCount = %d, want %d", got, want)
+	}
+}
+
+func TestIncFallback(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestCollectors(t)
+
+	c.IncFallback("kata", "firecracker")
+	c.IncFallback("kata", "firecracker")
+	c.IncFallback("gvisor", "native")
+
+	if got := testutil.ToFloat64(c.FallbackTotal.WithLabelValues("kata", "firecracker")); got != 2 {
+		t.Errorf("fallback kata→firecracker = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(c.FallbackTotal.WithLabelValues("gvisor", "native")); got != 1 {
+		t.Errorf("fallback gvisor→native = %v, want 1", got)
+	}
+}
+
+func TestSetNodeRuntimeAvailable(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestCollectors(t)
+
+	c.SetNodeRuntimeAvailable("firecracker", true)
+	c.SetNodeRuntimeAvailable("kata", false)
+
+	if got := testutil.ToFloat64(c.NodeRuntimeAvailable.WithLabelValues("firecracker")); got != 1 {
+		t.Errorf("firecracker available = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(c.NodeRuntimeAvailable.WithLabelValues("kata")); got != 0 {
+		t.Errorf("kata available = %v, want 0", got)
+	}
+}
+
+func TestIncNodeProbeError(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestCollectors(t)
+
+	c.IncNodeProbeError("firecracker", "binary_missing")
+	c.IncNodeProbeError("firecracker", "binary_missing")
+	c.IncNodeProbeError("kata", "timeout")
+
+	if got := testutil.ToFloat64(c.NodeRuntimeProbeErrors.WithLabelValues("firecracker", "binary_missing")); got != 2 {
+		t.Errorf("probe errors firecracker/binary_missing = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(c.NodeRuntimeProbeErrors.WithLabelValues("kata", "timeout")); got != 1 {
+		t.Errorf("probe errors kata/timeout = %v, want 1", got)
 	}
 }
 
@@ -115,7 +176,11 @@ func TestNilReceiverNoPanic(t *testing.T) {
 	c.RecordPhaseTransition("", "", setecv1alpha1.SandboxPhasePending)
 	c.RecordDuration("", "", "", time.Second)
 	c.RecordColdStart("", "", time.Second)
+	c.ObserveColdStart("", "", "", time.Second)
 	c.SetActive("", "", 1)
+	c.IncFallback("", "")
+	c.SetNodeRuntimeAvailable("", false)
+	c.IncNodeProbeError("", "")
 }
 
 // TestCollectAndLint runs testutil.CollectAndFormat against every metric
@@ -128,6 +193,9 @@ func TestCollectAndLint(t *testing.T) {
 	c.RecordDuration("tenant", "cls", string(setecv1alpha1.SandboxPhasePending), time.Millisecond)
 	c.RecordColdStart("firecracker", "cls", time.Second)
 	c.SetActive("tenant", "cls", 1)
+	c.IncFallback("kata", "firecracker")
+	c.SetNodeRuntimeAvailable("firecracker", true)
+	c.IncNodeProbeError("firecracker", "binary_missing")
 
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -139,6 +207,9 @@ func TestCollectAndLint(t *testing.T) {
 		"setec_sandbox_duration_seconds",
 		"setec_sandbox_cold_start_seconds",
 		"setec_sandbox_active",
+		"setec_sandbox_fallback_total",
+		"setec_node_runtime_available",
+		"setec_node_runtime_probe_errors_total",
 	}
 	seen := map[string]bool{}
 	for _, mf := range mfs {

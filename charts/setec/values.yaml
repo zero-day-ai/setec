@@ -51,7 +51,162 @@ resources:
 # attach to every Sandbox Pod it creates. Must match the RuntimeClass
 # installed by kata-deploy on your cluster. Default `kata-fc` selects the
 # Firecracker VMM configuration.
+# Deprecated: use runtimes.kata-fc.runtimeClassName instead. When set, populates
+# runtimes.kata-fc.runtimeClassName for backwards compat. Scheduled for
+# removal one release after the runtimes block becomes the canonical config.
 runtimeClassName: kata-fc
+
+# -- runtimes declares the isolation backends the operator knows about and
+# whether each is installed on this cluster. The admission webhook and
+# reconciler use this set to validate SandboxClass specs, select backends at
+# launch time, and render only the RuntimeClass manifests that match. Every
+# enabled=true entry MUST correspond to a RuntimeClass present in the cluster
+# (either managed by this chart with install=true, or installed out of band
+# with install=false).
+runtimes:
+  # -- kata-fc is kata-containers with the Firecracker VMM. Lowest attack
+  # surface and fastest cold start among the kata variants. Requires KVM
+  # exposed on the node, which rules out most managed-Kubernetes non-metal
+  # node pools (EKS/AKS/GKE default worker SKUs do NOT expose KVM).
+  kata-fc:
+    # -- enabled gates this backend cluster-wide. When false the webhook
+    # rejects SandboxClass specs that reference it and no RuntimeClass is
+    # rendered.
+    enabled: true
+    # -- runtimeClassName is the RuntimeClass name the operator attaches to
+    # Pods targeting this backend. Must match the name of the cluster's
+    # kata-fc RuntimeClass.
+    runtimeClassName: kata-fc
+    # -- install controls whether this chart renders the RuntimeClass object.
+    # Set to false when an external process (e.g. kata-deploy, the cloud
+    # provider, a separate Helm chart) already manages the RuntimeClass.
+    install: true
+    # -- defaultOverhead is the resource overhead applied to Sandbox Pods
+    # when the SandboxClass does not set its own. Accounts for the
+    # Firecracker VMM process memory and a small vCPU reservation.
+    defaultOverhead:
+      memory: 128Mi
+      cpu: 250m
+  # -- kata-qemu is kata-containers with the QEMU VMM. Slower and heavier
+  # than kata-fc but works on nodes without KVM (falls back to TCG
+  # emulation — orders of magnitude slower, use only when you must). Useful
+  # as a compatibility tier on managed-K8s nodes that block KVM.
+  kata-qemu:
+    # -- enabled disabled by default. Opt in explicitly; the performance
+    # characteristics are very different from kata-fc.
+    enabled: false
+    # -- runtimeClassName must match the cluster's kata-qemu RuntimeClass.
+    runtimeClassName: kata-qemu
+    # -- install toggles chart-managed RuntimeClass. See kata-fc.install.
+    install: true
+    # -- defaultOverhead mirrors kata-fc — QEMU's footprint is larger but
+    # the Kubernetes-level overhead accounting remains the same ballpark.
+    defaultOverhead:
+      memory: 128Mi
+      cpu: 250m
+  # -- gvisor is a userspace syscall-filter kernel (runsc). Lower overhead
+  # than a microVM (no VMM, no separate kernel image) but weaker isolation:
+  # a kernel bug in runsc is a sandbox escape. Good middle-ground when
+  # nested virt is unavailable and runc is too permissive.
+  gvisor:
+    # -- enabled disabled by default. Requires runsc binary + containerd
+    # runtime handler on every node where you schedule gvisor workloads.
+    enabled: false
+    # -- runtimeClassName must match the cluster's gvisor RuntimeClass.
+    runtimeClassName: gvisor
+    # -- install toggles chart-managed RuntimeClass.
+    install: true
+    # -- defaultOverhead is the gvisor sentry process footprint — much
+    # smaller than a full VMM.
+    defaultOverhead:
+      memory: 40Mi
+      cpu: 50m
+  # -- runc is plain Linux container namespaces — the default Kubernetes
+  # runtime. NO isolation beyond namespaces and seccomp. DEV/DEBUG ONLY;
+  # gated behind the namespace label setec.zero-day.ai/allow-dev-runtimes
+  # by the admission webhook. Never use in production tenancy scenarios.
+  runc:
+    # -- enabled disabled by default. Intended to simplify local dev and
+    # CI where you want to exercise the Setec control plane without a
+    # real isolation layer.
+    enabled: false
+    # -- runtimeClassName must match the cluster's runc RuntimeClass.
+    runtimeClassName: runc
+    # -- install toggles chart-managed RuntimeClass.
+    install: true
+    # -- devOnly is the admission-webhook gate. The webhook will reject
+    # SandboxClass specs referencing runc unless the target namespace
+    # carries setec.zero-day.ai/allow-dev-runtimes=true. Do not set to
+    # false without understanding the tenancy implications.
+    devOnly: true
+
+# -- defaults captures cluster-wide runtime selection defaults consumed by the
+# operator, the admission webhook, and the node-agent DaemonSet. These are
+# read at startup from /etc/setec/runtimes.yaml (rendered from values into a
+# ConfigMap). Changes require a controller restart to take effect.
+defaults:
+  runtime:
+    # -- backend is the cluster-default isolation backend applied when a
+    # Sandbox references no SandboxClass, or when a SandboxClass leaves
+    # runtime.backend unset. MUST name a backend with enabled=true in the
+    # runtimes block above, or the chart will fail to install.
+    backend: kata-fc
+    # -- fallback is the ordered list of backends the reconciler tries when
+    # the primary backend has no capable node (e.g. kata-fc on a KVM-less
+    # fleet). Each entry must be enabled. Empty list disables fallback and
+    # surfaces the unschedulable condition instead.
+    fallback: []
+    # -- probeInterval is how often the node-agent DaemonSet re-probes node
+    # capabilities and refreshes the setec.zero-day.ai/runtime.<backend>
+    # labels. Shorter intervals detect KVM removal faster at the cost of
+    # extra node-agent wake-ups. Parsed as a Go duration.
+    probeInterval: 5m
+    # -- nodeCapabilitiesMode is either "probe" (default — node-agent
+    # DaemonSet probes each node and writes labels) or "static" (operator
+    # trusts staticCapabilities below and the DaemonSet is not rendered).
+    # Use "static" on platforms where the DaemonSet cannot mount host
+    # paths or in air-gapped clusters with a fixed hardware inventory.
+    nodeCapabilitiesMode: probe
+    # -- staticCapabilities maps nodeName -> [backends] and is consulted
+    # only when nodeCapabilitiesMode=static. Leave empty in probe mode.
+    # Example:
+    #   staticCapabilities:
+    #     worker-1: ["kata-fc", "gvisor"]
+    #     worker-2: ["gvisor"]
+    staticCapabilities: {}
+
+# -- runtimeAgent configures the per-node capabilities probing DaemonSet that
+# writes setec.zero-day.ai/runtime.<backend>=true|false labels and the
+# SetecRuntimes Node status condition. Only rendered when
+# defaults.runtime.nodeCapabilitiesMode != "static".
+runtimeAgent:
+  image:
+    # -- repository is the runtime-agent image. Override for private
+    # mirrors.
+    repository: ghcr.io/zero-day-ai/setec-runtime-agent
+    # -- tag defaults to .Chart.AppVersion when left empty. Pin explicitly
+    # for reproducible deploys.
+    tag: ""
+    # -- pullPolicy one of Always, Never, IfNotPresent.
+    pullPolicy: IfNotPresent
+  # -- resources sizes the runtime-agent container. It is near-idle between
+  # probe cycles (default 5m), so small requests are appropriate.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  # -- metricsPort is the TCP port the agent serves /metrics and /healthz
+  # on. Probes target this port.
+  metricsPort: 8080
+  # -- mountContainerdConfig toggles the read-only hostPath mount of
+  # /etc/containerd into the agent. The gvisor/runc probes peek at the
+  # containerd runtime config to confirm a handler is registered. Disable
+  # on nodes where /etc/containerd is locked down and false-negatives are
+  # acceptable.
+  mountContainerdConfig: true
 
 # -- nodeSelectorLabel is the Node label key the startup prerequisite check
 # uses to determine whether any Kata-capable Nodes exist. Informational only;

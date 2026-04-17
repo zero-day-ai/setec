@@ -30,7 +30,13 @@ spec:
             - --metrics-bind-address=:{{ .Values.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.healthPort }}
             - --leader-elect={{ .Values.leaderElect }}
+            - --runtimes-config=/etc/setec/runtimes.yaml
+            {{- /* Legacy alias preserved for one release so existing
+                    `--set runtimeClassName=...` overrides keep working. Remove
+                    alongside the deprecated value. */ -}}
+            {{- if .Values.runtimeClassName }}
             - --runtime-class-name={{ .Values.runtimeClassName }}
+            {{- end }}
             - --node-selector-label={{ .Values.nodeSelectorLabel }}
             {{- if .Values.multiTenancy.enabled }}
             - --multi-tenancy-enabled
@@ -82,8 +88,11 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
-          {{- if or .Values.snapshots.enabled (and .Values.observability.enabled .Values.observability.otelTLS.enabled .Values.observability.otelTLS.caSecretName) }}
           volumeMounts:
+            - name: runtimes-config
+              mountPath: /etc/setec/runtimes.yaml
+              subPath: runtimes.yaml
+              readOnly: true
             {{- if .Values.snapshots.enabled }}
             - name: nodeagent-tls
               mountPath: /etc/setec/nodeagent-tls
@@ -97,9 +106,13 @@ spec:
               mountPath: /etc/setec/otel-ca
               readOnly: true
             {{- end }}
-          {{- end }}
-      {{- if or .Values.snapshots.enabled (and .Values.observability.enabled .Values.observability.otelTLS.enabled .Values.observability.otelTLS.caSecretName) }}
       volumes:
+        - name: runtimes-config
+          configMap:
+            name: {{ include "setec.fullname" . }}-runtimes
+            items:
+              - key: runtimes.yaml
+                path: runtimes.yaml
         {{- if .Values.snapshots.enabled }}
         - name: nodeagent-tls
           secret:
@@ -113,7 +126,6 @@ spec:
           secret:
             secretName: {{ .Values.observability.otelTLS.caSecretName }}
         {{- end }}
-      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

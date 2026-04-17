@@ -119,3 +119,86 @@ func Check(
 
 	return result, nil
 }
+
+// CheckMulti verifies cluster-level prerequisites for every enabled backend.
+//
+// For each backend in enabledBackends it performs:
+//  1. Get on a nodev1.RuntimeClass named classNames[backend]. NotFound appends
+//     a vendor-neutral warning; other errors are returned.
+//  2. List on corev1.Node filtered by the label
+//     "setec.zero-day.ai/runtime.<backend>=true". Zero matches appends a
+//     warning; other errors are returned.
+//
+// CheckResult.RuntimeClassPresent is true only when ALL enabled backends have
+// a RuntimeClass. CheckResult.KataCapableNodes is true when at least one Node
+// carries ANY enabled-backend label (a cluster-wide capability check).
+//
+// nodeLabel is the legacy single-backend label still used for the
+// KataCapableNodes flag in the returned result so /readyz backward compatibility
+// is preserved when only kata-fc is enabled.
+//
+// Disabled backends are silently skipped; they do not produce warnings.
+// CheckMulti never panics on NotFound.
+func CheckMulti(
+	ctx context.Context,
+	c client.Client,
+	enabledBackends []string,
+	classNames map[string]string, // backend → RuntimeClass name
+	nodeLabel string,
+) (CheckResult, error) {
+	// When only kata-fc is enabled, delegate to the original Check so
+	// the warning text remains identical (smoke-test compatibility per
+	// task-11 requirements).
+	if len(enabledBackends) == 1 && enabledBackends[0] == "kata-fc" {
+		return Check(ctx, c, classNames["kata-fc"], nodeLabel)
+	}
+
+	result := CheckResult{}
+	allPresent := true
+
+	for _, backend := range enabledBackends {
+		rcName, ok := classNames[backend]
+		if !ok || rcName == "" {
+			// No RuntimeClass name configured for this backend; treat as missing.
+			allPresent = false
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"backend %q is enabled but has no runtimeClassName configured — enable it via Helm runtimes.%s.runtimeClassName",
+				backend, backend,
+			))
+			continue
+		}
+
+		rc := &nodev1.RuntimeClass{}
+		err := c.Get(ctx, types.NamespacedName{Name: rcName}, rc)
+		switch {
+		case err == nil:
+			// RuntimeClass present for this backend.
+		case apierrors.IsNotFound(err):
+			allPresent = false
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"RuntimeClass %q (backend=%s) not found; install the runtime and register the RuntimeClass — see project documentation",
+				rcName, backend,
+			))
+		default:
+			return result, fmt.Errorf("prereq: get RuntimeClass %q (backend=%s): %w", rcName, backend, err)
+		}
+
+		// Check that at least one Node advertises this backend.
+		backendLabel := "setec.zero-day.ai/runtime." + backend
+		nodes := &corev1.NodeList{}
+		if err := c.List(ctx, nodes, client.MatchingLabels{backendLabel: "true"}); err != nil {
+			return result, fmt.Errorf("prereq: list Nodes with label %q: %w", backendLabel, err)
+		}
+		if len(nodes.Items) > 0 {
+			result.KataCapableNodes = true
+		} else {
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"no Nodes carry the %q label; label at least one Node capable of backend %q — see project documentation",
+				backendLabel, backend,
+			))
+		}
+	}
+
+	result.RuntimeClassPresent = allPresent
+	return result, nil
+}
