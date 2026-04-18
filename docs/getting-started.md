@@ -1,44 +1,74 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Getting Started with Setec
 
-This is a narrative walk-through that takes roughly fifteen minutes and ends with a workload running inside a Firecracker microVM under Kubernetes control. Where the [quickstart](./quickstart.md) says "run this command", this page says "run this command; you should see X; this is happening because Y". If you have done this before, the quickstart is shorter.
+This is a narrative walk-through that takes roughly fifteen minutes and ends with a workload running inside an isolated sandbox under Kubernetes control. Where the [quickstart](./quickstart.md) says "run this command", this page says "run this command; you should see X; this is happening because Y". If you have done this before, the quickstart is shorter.
 
 Everything here runs against your own cluster. No cloud account, no login, no telemetry.
+
+## Pick a runtime backend
+
+Setec supports four runtime backends (`kata-fc`, `kata-qemu`, `gvisor`, `runc`). The one you install prerequisites for depends on what your worker nodes can do:
+
+| If your nodes … | Install prerequisites for | Notes |
+|---|---|---|
+| Have `/dev/kvm` (bare metal or nested-virt) | `kata-fc` | Strongest isolation. This walk-through defaults to it. |
+| Have `/dev/kvm` but no Firecracker install path | `kata-qemu` | Same isolation model, QEMU VMM. |
+| Cannot expose `/dev/kvm` (managed K8s without nested virt) | `gvisor` | User-space kernel, broad platform support. |
+| Are a local dev cluster and you don't need isolation | `runc` | Dev-only; gated by a Helm flag. |
+
+The [runtime-backends](./runtime-backends/README.md) doc has the full isolation / CVE-surface / overhead matrix, plus per-platform (EKS / AKS / GKE) playbooks. This tutorial uses `kata-fc` for the strongest-isolation default; all steps work with minimal changes for the other backends.
 
 ## Before You Start
 
 You will need:
 
-1. A Kubernetes cluster (1.28 or later) with cluster-admin credentials. A single-node development cluster works, provided the node can run KVM.
-2. A worker node with `/dev/kvm` present. Bare-metal Linux is the easy case; a nested-virtualization VM also works if the outer hypervisor permits it.
+1. A Kubernetes cluster (1.28 or later) with cluster-admin credentials. A single-node development cluster works, provided the node meets at least one backend's prerequisites.
+2. At least one worker node that meets your chosen backend's requirements (see the table above). For this walk-through: `/dev/kvm` present on the node.
 3. `kubectl` and `helm` 3.8 or later on your workstation.
 4. About fifteen minutes of unhurried time.
 
-If you are unsure about the KVM requirement, [`docs/prerequisites.md`](./prerequisites.md) covers how to check and how to label KVM-capable nodes.
+The full per-backend, per-platform prerequisite check-list is in [`docs/prerequisites.md`](./prerequisites.md).
 
-## Step 1: Verify KVM
+## Step 1: Verify KVM (kata-fc / kata-qemu only)
 
-Setec boots Firecracker microVMs. Firecracker needs `/dev/kvm`. The operator is happy to install without it, but every `Sandbox` you launch will stay `Pending` forever. Saving yourself that frustration takes one command on any worker node:
+If you chose `kata-fc` or `kata-qemu`, Setec needs `/dev/kvm` on the worker node. The operator is happy to install without it, but every `Sandbox` you launch will stay `Pending` forever. Saving yourself that frustration takes one command on any worker node:
 
 ```bash
 ls -l /dev/kvm
 ```
 
-You should see a character device owned by `root:kvm` (or similar). If you see "No such file or directory", the node is not running on bare metal or nested-virtualization is disabled. Fix that first; the rest of this tutorial assumes it is resolved.
+You should see a character device owned by `root:kvm` (or similar). If you see "No such file or directory", the node is not running on bare metal or nested-virtualization is disabled. Either fix that first, or re-pick a backend from the table above that does not require KVM (`gvisor` is the usual answer).
 
-## Step 2: Install Kata Containers
+## Step 2: Install the runtime
 
-Setec does not ship Kata. It treats Kata Containers as a prerequisite and talks to it through the standard Kubernetes `RuntimeClass` abstraction. The upstream `kata-deploy` installer lays down Kata binaries on every labelled node and registers the `kata-fc` `RuntimeClass`:
+Setec does not ship runtime backends. It treats them as prerequisites and talks to them through the standard Kubernetes `RuntimeClass` abstraction. Pick the install path for your chosen backend:
+
+**kata-fc / kata-qemu** (the upstream `kata-deploy` installer lays down Kata binaries on every labelled node and registers both `RuntimeClasses`):
 
 ```bash
 kubectl apply -k "github.com/kata-containers/kata-containers/tools/packaging/kata-deploy/kata-deploy/base?ref=main"
 kubectl rollout status -n kube-system ds/kata-deploy --timeout=5m
-kubectl get runtimeclass kata-fc
+kubectl get runtimeclass kata-fc kata-qemu
 ```
 
-The last command should print a row showing `kata-fc` with handler `kata-fc`. That's the handle Setec will use to tell Kubernetes "run this pod inside a Firecracker microVM instead of a regular container".
+**gvisor** (install `runsc` on nodes via the upstream DaemonSet, then create the `RuntimeClass`):
 
-If the rollout fails or the RuntimeClass is missing, stop here and consult [the upstream kata-deploy docs](https://github.com/kata-containers/kata-containers/blob/main/docs/install/kata-deploy/README.md). Setec cannot help you past this gate.
+```bash
+kubectl apply -f https://raw.githubusercontent.com/google/gvisor/master/tools/images/install-runsc.yaml
+kubectl apply -f - <<'EOF'
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+EOF
+```
+
+**runc** (no extra install — every Kubernetes cluster ships `runc`; Setec creates the `RuntimeClass` via the Helm chart when `runtime.runc.enabled=true` AND `runtime.runc.devOnly=true`).
+
+The corresponding `kubectl get runtimeclass …` command should print your chosen handle. That's the handle Setec will use to tell Kubernetes "run this pod in this isolation runtime".
+
+If the rollout fails or the RuntimeClass is missing, stop here and consult the upstream docs. Setec cannot help you past this gate.
 
 ## Step 3: Install Setec
 
@@ -50,7 +80,7 @@ helm install setec ./charts/setec \
   --create-namespace
 ```
 
-Helm prints a summary showing the release name, namespace, and the resources it created. There is a `Deployment` for the operator, a `DaemonSet` for the node-agent, a `ClusterRole`, a `ClusterRoleBinding`, a few `ServiceAccounts`, and the `Sandbox`, `SandboxClass`, and `Snapshot` `CustomResourceDefinitions`.
+Helm prints a summary showing the release name, namespace, and the resources it created. There is a `Deployment` for the operator, a `DaemonSet` for the node-agent, a second `DaemonSet` for the `runtime-agent` (probes each node's runtime backends and writes `setec.zero-day.ai/runtime.<backend>=true` labels), a `ClusterRole`, a `ClusterRoleBinding`, a few `ServiceAccounts`, and the `Sandbox`, `SandboxClass`, and `Snapshot` `CustomResourceDefinitions`.
 
 Check the operator is healthy:
 
@@ -65,11 +95,17 @@ Both the operator pod and the node-agent pod should be `Running`. Read a few lin
 kubectl -n setec-system logs deployment/setec | head -40
 ```
 
-Look for a line like `kata_runtime_available: true` and a count of Kata-capable nodes. If that is `false`, go back to step 2; Setec will accept your Sandboxes but nothing will boot.
+Look for a line like `enabled_backends: [kata-fc]` (or whichever backend you enabled) and a count of capable nodes. Check that at least one node carries the `setec.zero-day.ai/runtime.<backend>=true` label written by `runtime-agent`:
+
+```bash
+kubectl get nodes -L setec.zero-day.ai/runtime.kata-fc
+```
+
+If the column is empty, go back to step 2; Setec will accept your Sandboxes but nothing will schedule.
 
 ### What you just did
 
-You installed a Kubernetes operator that watches a set of custom resources, a node-agent that will eventually place Firecracker VMs on the host, and the CRDs that together form Setec's external contract. Nothing launched yet; the cluster is idling in a steady state.
+You installed a Kubernetes operator that watches a set of custom resources, a node-agent that will eventually place sandboxes on the host, a runtime-agent that probes each node's capabilities and labels it with the backends it supports, and the CRDs that together form Setec's external contract. Nothing launched yet; the cluster is idling in a steady state.
 
 ## Step 4: Launch Your First Sandbox
 
@@ -86,7 +122,7 @@ spec:
   command:
     - python
     - -c
-    - "print('hello from a Firecracker microVM')"
+    - "print('hello from an isolated sandbox')"
   resources:
     vcpu: 1
     memory: 512Mi

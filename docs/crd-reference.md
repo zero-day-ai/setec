@@ -152,18 +152,45 @@ Administrators author classes; tenants reference them by name in
 
 ### Schema
 
-- `spec.vmm` — enum: `firecracker`, `qemu`, `cloud-hypervisor`.
-- `spec.runtimeClassName` — optional RuntimeClass override.
+- `spec.runtime.backend` — enum: `kata-fc`, `kata-qemu`, `gvisor`, `runc`.
+  Required unless the deprecated `spec.vmm` is present (in which case
+  Setec's defaulting webhook translates it to `runtime.backend`).
+- `spec.runtime.fallback` — optional ordered list of backends to try
+  when `spec.runtime.backend` has no eligible Node. Example:
+  `[gvisor, runc]` under `backend: kata-fc` means "prefer microVM,
+  fall back to gvisor, then to runc on dev clusters".
+- `spec.runtime.params` — optional backend-specific tuning (e.g.
+  `kata-fc.snapshotEnabled: true`, `gvisor.platform: ptrace|kvm`).
+  Schema validated by the `SandboxClass` webhook; empty keys default
+  to upstream defaults.
+- `spec.vmm` — **deprecated** enum: `firecracker`, `qemu`,
+  `cloud-hypervisor`. Retained for back-compat; the defaulting webhook
+  maps `firecracker→kata-fc`, `qemu→kata-qemu`. Set `spec.runtime.*`
+  instead on new classes.
+- `spec.runtimeClassName` — **deprecated**. Use `spec.runtime.backend`
+  and let Setec pick the `RuntimeClass` per backend.
 - `spec.kernelImage`, `spec.rootfsImage` — optional OCI refs the node
-  agent prefetches.
+  agent prefetches (kata-fc / kata-qemu only; ignored for gvisor / runc).
 - `spec.defaultResources`, `spec.maxResources` — `{vcpu, memory}`
   blocks that set the default and ceiling for tenant Sandboxes.
 - `spec.allowedNetworkModes` — subset of `[full, egress-allow-list, none]`.
   Empty list means all modes allowed.
-- `spec.nodeSelector` — additive per-Sandbox node selector.
+- `spec.nodeSelector` — additive per-Sandbox node selector, merged with
+  the backend's own `NodeAffinity` from `setec.zero-day.ai/runtime.<backend>=true`.
 - `spec.default` — boolean. Exactly zero or one class may carry this.
 
-### Example
+### Validation rules (enforced by the SandboxClass webhook)
+
+- `spec.runtime.backend` must be in the cluster's enabled-backend set
+  (`runtime.<backend>.enabled=true` in Helm values). Attempting to use
+  a disabled backend fails admission.
+- `spec.runtime.backend=runc` is rejected unless Helm flag
+  `runtime.runc.devOnly=true` is also set. This prevents accidental
+  production use of namespace-only isolation.
+- `spec.vmm` and `spec.runtime.backend` are mutually exclusive; if both
+  are provided, admission fails. Migration: set one and delete the other.
+
+### Example (multi-backend with fallback)
 
 ```yaml
 apiVersion: setec.zero-day.ai/v1alpha1
@@ -171,8 +198,14 @@ kind: SandboxClass
 metadata:
   name: standard
 spec:
-  vmm: firecracker
-  runtimeClassName: kata-fc
+  runtime:
+    backend: kata-fc
+    fallback:
+      - kata-qemu
+      - gvisor
+    params:
+      kata-fc:
+        snapshotEnabled: true
   defaultResources:
     vcpu: 2
     memory: 2Gi
@@ -185,15 +218,42 @@ spec:
   default: true
 ```
 
+### Example (dev-only runc class)
+
+```yaml
+apiVersion: setec.zero-day.ai/v1alpha1
+kind: SandboxClass
+metadata:
+  name: dev-fast
+spec:
+  runtime:
+    backend: runc
+  defaultResources:
+    vcpu: 1
+    memory: 512Mi
+```
+
+(Requires Helm `runtime.runc.enabled=true` + `runtime.runc.devOnly=true`.)
+
 ### kubectl usage
 
 ```bash
 # Shortest alias
 kubectl get sbxcls
 
-# Printer columns show VMM, Default, Max-VCPU, Max-Memory, Age.
+# Printer columns show Backend, Default, Max-VCPU, Max-Memory, Age.
 kubectl get sandboxclasses.setec.zero-day.ai
 ```
+
+### Sandbox.status.runtime.chosen
+
+When a Sandbox schedules, the controller writes the actual backend it
+landed on to `status.runtime.chosen`. For fallback chains this lets you
+distinguish "scheduled on kata-fc as requested" from "fell back to
+kata-qemu because no kata-fc-capable Node was Ready". A
+`FallbackExhausted` phase means no backend in the chain had an eligible
+Node; `NoEligibleNode` means the primary `spec.runtime.backend` had
+none and there was no fallback configured.
 
 ## Phase 3 extensions
 

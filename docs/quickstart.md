@@ -4,37 +4,46 @@ This guide takes a prepared user from an empty cluster to a running
 `Sandbox` in under 15 minutes.
 
 You need working familiarity with `kubectl` and `helm`. If something goes
-wrong at the Kata layer, the upstream
-[Kata Containers documentation](https://katacontainers.io/docs/) is the
-authoritative reference — Setec does not install, manage, or modify Kata.
+wrong at the runtime layer, the upstream documentation for your chosen
+backend is the authoritative reference — Setec does not install, manage,
+or modify the runtime backends themselves.
 
 ## 1. Prerequisites
 
 Before you start, verify all of the following on your workstation:
 
 - [ ] A Kubernetes **1.28+** cluster you can reach with `kubectl`.
-- [ ] At least one worker Node is **KVM-capable** (bare-metal Linux, or a
-      VM with nested virtualization enabled). Setec runs Firecracker
-      microVMs, which require `/dev/kvm`.
+- [ ] At least one worker Node meets the requirements of a runtime backend
+      you intend to enable — see the table below.
 - [ ] `kubectl` configured for the target cluster (`kubectl cluster-info`
       succeeds).
 - [ ] `helm` 3.8 or later (`helm version`).
 - [ ] Cluster-admin permission in the target cluster for the duration of
       the install (needed to register the CRD and ClusterRole).
 
-If you are not sure whether a Node can run Kata, see
-[docs/prerequisites.md](prerequisites.md) for how to check and how to
-label Kata-capable Nodes.
+| Backend | Node requirement | Typical use |
+|---|---|---|
+| `kata-fc` | `/dev/kvm` + Kata Containers installed | Default; strongest isolation |
+| `kata-qemu` | `/dev/kvm` + Kata Containers installed | Same isolation model, QEMU VMM |
+| `gvisor` | `runsc` binary + `gvisor` `RuntimeClass` | Managed K8s without nested virt |
+| `runc` | Any container runtime (Helm `runtime.runc.enabled=true` + `runtime.runc.devOnly=true`) | Dev clusters only |
 
-## 2. Install Kata Containers
+If you are not sure what your nodes can do, see
+[docs/prerequisites.md](prerequisites.md) for per-backend, per-platform
+checks.
 
-Setec depends on Kata Containers being installed cluster-side so that a
-`kata-fc` `RuntimeClass` is registered and Kata binaries are present on
-worker Nodes. Setec does not install Kata for you.
+## 2. Install a runtime backend
 
-The upstream project ships `kata-deploy`, a manifest-driven installer that
-lays down the Kata binaries on every labeled Node and creates the Kata
-RuntimeClasses:
+Pick one (or more) backends and install the node-level prerequisites.
+This quickstart uses `kata-fc` by default; substitute the commands for
+your chosen backend.
+
+### kata-fc / kata-qemu
+
+Setec depends on Kata Containers being installed cluster-side so that
+`kata-fc` (and optionally `kata-qemu`) `RuntimeClass` objects are
+registered and Kata binaries are present on worker Nodes. Setec does not
+install Kata for you. The upstream project ships `kata-deploy`:
 
 ```bash
 kubectl apply -k "github.com/kata-containers/kata-containers/tools/packaging/kata-deploy/kata-deploy/base?ref=main"
@@ -54,9 +63,33 @@ NAME      HANDLER   AGE
 kata-fc   kata-fc   1m
 ```
 
-If `kata-fc` is missing, re-check the `kata-deploy` rollout logs and the
-[upstream installation guide](https://github.com/kata-containers/kata-containers/blob/main/docs/install/README.md).
-Setec cannot run workloads without it.
+### gvisor
+
+Install `runsc` on every node you want to run gvisor on, then register
+the `RuntimeClass`:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/google/gvisor/master/tools/images/install-runsc.yaml
+kubectl apply -f - <<'EOF'
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+EOF
+kubectl get runtimeclass gvisor
+```
+
+### runc (dev only)
+
+`runc` needs no node-level install. When you install Setec at step 3,
+pass `--set runtime.runc.enabled=true --set runtime.runc.devOnly=true`
+and Setec will register a `runc` `RuntimeClass` and permit SandboxClasses
+to select it.
+
+If the `RuntimeClass` you expected is missing, re-check the install
+rollout logs and the upstream docs for your chosen backend — Setec
+cannot run workloads without it.
 
 ## 3. Install Setec
 
@@ -92,10 +125,18 @@ Check the operator's view of the cluster:
 kubectl -n setec-system logs deployment/setec | head -40
 ```
 
-You should see a startup log line reporting `kata_runtime_available: true`
-and a count of Kata-capable Nodes. If `kata_runtime_available: false`, go
-back to step 2 — Setec will start anyway, but any `Sandbox` you apply will
-stay in `Pending` with a `RuntimeUnavailable` event.
+You should see a startup log line reporting `enabled_backends: [kata-fc]`
+(or your chosen backends) and a count of capable Nodes — determined by
+the `setec.zero-day.ai/runtime.<backend>=true` labels the `runtime-agent`
+DaemonSet writes on each Node. If the count is zero, go back to step 2 —
+Setec will start anyway, but any `Sandbox` you apply will stay in
+`Pending` with a `NoEligibleNode` event.
+
+Check Node labels directly:
+
+```bash
+kubectl get nodes -L setec.zero-day.ai/runtime.kata-fc
+```
 
 ## 4. Apply your first Sandbox
 
