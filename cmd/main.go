@@ -307,20 +307,24 @@ func main() {
 			os.Exit(1)
 		}
 		dialer.TLSConfig = tlsConfig
+		//nolint:staticcheck // GetEventRecorderFor: controller-runtime API change, follow-up
+		snapshotCoordRecorder := mgr.GetEventRecorderFor("snapshot-coordinator")
 		coordinator = &snapshot.Coordinator{
 			Client:            mgr.GetClient(),
 			Dialer:            dialer,
-			Recorder:          mgr.GetEventRecorderFor("snapshot-coordinator"),
+			Recorder:          snapshotCoordRecorder,
 			Metrics:           collectors,
 			Tracer:            tracer,
 			KataSocketPattern: kataSocketPattern,
 		}
 	}
 
+	//nolint:staticcheck // GetEventRecorderFor: controller-runtime API change, follow-up
+	sandboxRecorder := mgr.GetEventRecorderFor("sandbox-controller")
 	if err := (&controller.SandboxReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
-		Recorder:            mgr.GetEventRecorderFor("sandbox-controller"),
+		Recorder:            sandboxRecorder,
 		NodeSelectorLabel:   nodeSelectorLabel,
 		Runtimes:            runtimeRegistry,
 		RuntimeCfg:          runtimeCfg,
@@ -337,10 +341,12 @@ func main() {
 
 	// Phase 3: register the SnapshotReconciler when enabled.
 	if snapshotsEnabled {
+		//nolint:staticcheck // GetEventRecorderFor: controller-runtime API change, follow-up
+		snapshotCtrlRecorder := mgr.GetEventRecorderFor("snapshot-controller")
 		if err := (&controller.SnapshotReconciler{
 			Client:      mgr.GetClient(),
 			Scheme:      mgr.GetScheme(),
-			Recorder:    mgr.GetEventRecorderFor("snapshot-controller"),
+			Recorder:    snapshotCtrlRecorder,
 			Coordinator: coordinator,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to set up SnapshotReconciler")
