@@ -30,8 +30,8 @@ type fakeDispatcher struct {
 	name string
 }
 
-func (f *fakeDispatcher) Name() string                                        { return f.name }
-func (f *fakeDispatcher) RuntimeClassName() string                            { return f.name }
+func (f *fakeDispatcher) Name() string                                       { return f.name }
+func (f *fakeDispatcher) RuntimeClassName() string                           { return f.name }
 func (f *fakeDispatcher) NodeAffinity() *corev1.NodeAffinity                 { return nil }
 func (f *fakeDispatcher) Overhead() corev1.ResourceList                      { return nil }
 func (f *fakeDispatcher) MutatePod(_ *corev1.Pod, _ map[string]string) error { return nil }
@@ -84,7 +84,7 @@ func TestRegistry_Select(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		registeredNames  []string       // dispatchers in registry
+		registeredNames  []string // dispatchers in registry
 		class            *v1alpha1.SandboxClass
 		cfg              *RuntimeConfig
 		nodeCapabilities []string
@@ -162,7 +162,7 @@ func TestRegistry_Select(t *testing.T) {
 		},
 		{
 			name:             "primary not registered — fallback registered and capable",
-			registeredNames:  []string{BackendGVisor},      // kata-fc dispatcher absent
+			registeredNames:  []string{BackendGVisor}, // kata-fc dispatcher absent
 			class:            sandboxClassWith(BackendKataFC, BackendGVisor),
 			cfg:              cfgWithDefaults(BackendKataFC),
 			nodeCapabilities: []string{BackendKataFC, BackendGVisor},

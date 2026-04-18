@@ -54,7 +54,7 @@ func TestSaveOpenRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	got, err := io.ReadAll(rc)
 	if err != nil {

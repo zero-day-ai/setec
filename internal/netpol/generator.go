@@ -165,7 +165,8 @@ func egressAllowList(sb *setecv1alpha1.Sandbox) *networkingv1.NetworkPolicy {
 		Ports: []networkingv1.NetworkPolicyPort{dnsUDP, dnsTCP},
 	}
 
-	egress := []networkingv1.NetworkPolicyEgressRule{dnsRule}
+	egress := make([]networkingv1.NetworkPolicyEgressRule, 0, 1+len(sb.Spec.Network.Allow))
+	egress = append(egress, dnsRule)
 
 	// One egress rule per Allow entry. Port is pulled from the entry;
 	// Protocol defaults to TCP because Sandbox.spec.network.allow

@@ -135,7 +135,6 @@ func TestResolver_Resolve(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := newFakeClient(t, tc.seed...)

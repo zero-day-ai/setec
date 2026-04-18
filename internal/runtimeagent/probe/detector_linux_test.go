@@ -1,3 +1,5 @@
+//go:build linux
+
 /*
 Copyright 2026 The Setec Authors.
 
@@ -13,8 +15,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
-//go:build linux
 
 package probe
 
@@ -73,7 +73,6 @@ func TestKVMAvailable(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := mkFakeFS(t, tc.paths...)
@@ -126,7 +125,6 @@ func TestModuleLoaded(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := mkFakeFS(t, tc.paths...)

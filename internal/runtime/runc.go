@@ -68,7 +68,7 @@ func (d *RuncDispatcher) RuntimeClassName() string { return d.cfg.RuntimeClassNa
 // NodeAffinity implements Dispatcher.  It requires the node label
 // setec.zero-day.ai/runtime.runc=true and kubernetes.io/os=linux.
 func (d *RuncDispatcher) NodeAffinity() *corev1.NodeAffinity {
-	return requiredRuntimeNodeAffinity(runtimeAffinityLabel(BackendRunc), "true")
+	return requiredRuntimeNodeAffinity(runtimeAffinityLabel(BackendRunc))
 }
 
 // Overhead implements Dispatcher.  Returns BackendConfig.DefaultOverhead when

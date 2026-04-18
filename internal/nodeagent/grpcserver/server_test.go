@@ -455,7 +455,7 @@ func makeFramedPayload(t *testing.T, state, mem []byte) []byte {
 	if err != nil {
 		t.Fatalf("makeFramedReader: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	raw, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("readAll: %v", err)

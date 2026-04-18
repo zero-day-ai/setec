@@ -19,6 +19,7 @@ package webhook
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -107,7 +108,7 @@ func (w *SandboxClassWebhook) Default(_ context.Context, class *setecv1alpha1.Sa
 	}
 
 	backend := ""
-	switch class.Spec.VMM {
+	switch class.Spec.VMM { //nolint:staticcheck // back-compat: VMM retained until v2
 	case setecv1alpha1.VMMFirecracker:
 		backend = runtime.BackendKataFC
 	case setecv1alpha1.VMMQEMU:
@@ -236,13 +237,7 @@ func (w *SandboxClassWebhook) validateBackendEnabled(backend string, fldPath *fi
 // get a distinct message referencing AllKnownBackends so the user knows exactly
 // what values are accepted.
 func (w *SandboxClassWebhook) validateBackendKnownAndEnabled(backend string, fldPath *field.Path) *field.Error {
-	known := false
-	for _, k := range runtime.AllKnownBackends {
-		if k == backend {
-			known = true
-			break
-		}
-	}
+	known := slices.Contains(runtime.AllKnownBackends, backend)
 	if !known {
 		return field.Invalid(fldPath, backend,
 			fmt.Sprintf("%q is not a recognised backend; must be one of %v", backend, runtime.AllKnownBackends))

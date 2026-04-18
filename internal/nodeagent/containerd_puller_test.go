@@ -405,14 +405,14 @@ func TestHelpers_NilErrors(t *testing.T) {
 // including the docker.io index alias fallback.
 func TestLookupDockerCreds(t *testing.T) {
 	creds := map[string]dockerAuthEntry{
-		"ghcr.io":                        {username: "ghu", password: "ghp"},
-		"https://index.docker.io/v1/":    {username: "dock", password: "dpw"},
+		"ghcr.io":                     {username: "ghu", password: "ghp"},
+		"https://index.docker.io/v1/": {username: "dock", password: "dpw"},
 	}
 	cases := []struct {
-		name       string
-		host       string
-		wantUser   string
-		wantPass   string
+		name     string
+		host     string
+		wantUser string
+		wantPass string
 	}{
 		{"direct hit", "ghcr.io", "ghu", "ghp"},
 		{"docker.io alias", "registry-1.docker.io", "dock", "dpw"},
@@ -436,12 +436,10 @@ func TestPull_Dedupes(t *testing.T) {
 	p := newContainerdPullerWithClient(fake, "k8s.io", "")
 
 	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 5 {
+		wg.Go(func() {
 			_ = p.Pull(context.Background(), "alpine:latest")
-		}()
+		})
 	}
 	wg.Wait()
 	if fake.pullCalls != 1 {

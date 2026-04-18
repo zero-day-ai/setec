@@ -210,7 +210,7 @@ func (v *SandboxValidator) validate(ctx context.Context, sb *setecv1alpha1.Sandb
 		switch {
 		case apierrors.IsNotFound(getErr):
 			errs = append(errs, fmt.Errorf(
-				"Snapshot %q not found in namespace %q",
+				"snapshot %q not found in namespace %q",
 				sb.Spec.SnapshotRef.Name, sb.Namespace))
 		case getErr != nil:
 			return nil, fmt.Errorf("webhook: resolve Snapshot: %w", getErr)

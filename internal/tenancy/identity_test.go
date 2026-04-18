@@ -146,7 +146,6 @@ func TestFromNamespace(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := FromNamespace(tc.ns, tc.labelKey)
@@ -231,7 +230,6 @@ func TestFromCertificate(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := FromCertificate(tc.cert)

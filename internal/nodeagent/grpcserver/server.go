@@ -125,7 +125,7 @@ func (s *Server) CreateSnapshot(ctx context.Context, in *setecgrpcv1alpha1.Creat
 	memPath := filepath.Join(dir, "memory.bin")
 
 	// Ensure we clean up the temp files even on error paths.
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	if err := fc.CreateSnapshot(ctx, statePath, memPath); err != nil {
 		return nil, status.Errorf(codes.Internal, "firecracker createSnapshot: %v", err)
@@ -140,7 +140,7 @@ func (s *Server) CreateSnapshot(ctx context.Context, in *setecgrpcv1alpha1.Creat
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "assemble framed stream: %v", err)
 	}
-	defer combined.Close()
+	defer func() { _ = combined.Close() }()
 
 	size, ref, saveErr := s.Storage.Save(ctx, in.GetSnapshotId(), combined)
 	if saveErr != nil {
@@ -181,13 +181,13 @@ func (s *Server) RestoreSandbox(ctx context.Context, in *setecgrpcv1alpha1.Resto
 		}
 		return nil, status.Errorf(codes.Internal, "open snapshot: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	dir := filepath.Join(s.tempDir(), in.GetSnapshotId()+"-restore-"+fmt.Sprintf("%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, status.Errorf(codes.Internal, "mkdir: %v", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	statePath := filepath.Join(dir, "state.bin")
 	memPath := filepath.Join(dir, "memory.bin")
 
@@ -351,7 +351,7 @@ func writeN(r io.Reader, path string, n int64) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = io.CopyN(f, r, n)
 	return err
 }

@@ -139,7 +139,6 @@ func TestCheck(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -373,7 +372,7 @@ func TestCheckMulti_DisabledBackendSkipped(t *testing.T) {
 			// Both the new-style setec label and the legacy kata label are
 			// present so the delegate call to Check can find the node.
 			"setec.zero-day.ai/runtime.kata-fc": "true",
-			testNodeLabel:                        "true",
+			testNodeLabel:                       "true",
 		}),
 		// No runc RuntimeClass; if CheckMulti tried to Get it, the test
 		// would still not fail (NotFound is tolerated), but we verify no
@@ -409,7 +408,7 @@ func TestCheckMulti_SingleKataFCDelegates(t *testing.T) {
 		runtimeClassObj(testRuntimeClass),
 		// Both labels for full compatibility.
 		nodeObj("node-kata", map[string]string{
-			testNodeLabel:                        "true",
+			testNodeLabel:                       "true",
 			"setec.zero-day.ai/runtime.kata-fc": "true",
 		}),
 	}

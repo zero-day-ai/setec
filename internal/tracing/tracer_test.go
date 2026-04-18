@@ -256,12 +256,12 @@ func testGeneratePEM(t *testing.T) []byte {
 		t.Fatalf("GenerateKey: %v", err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "setec test CA"},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "setec test CA"},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)

@@ -24,8 +24,8 @@ func TestTickReconciler_FiresImmediatelyAndOnTick(t *testing.T) {
 
 	// Use a Lister that records how many times it's been asked.
 	var listed atomic.Int32
-	var buf []setecv1alpha1.SandboxClass
-	buf = append(buf, newClass("std", "img:v1", 0, time.Hour)) // size 0 → no boot work, fast
+	buf := make([]setecv1alpha1.SandboxClass, 0, 1)
+	buf = append(buf, newClass("img:v1", 0, time.Hour)) // size 0 → no boot work, fast
 
 	r := &TickReconciler{
 		Manager: m,
@@ -74,8 +74,7 @@ func TestTickReconciler_ExitsOnCancel(t *testing.T) {
 
 func TestTickReconciler_MissingDeps(t *testing.T) {
 	r := &TickReconciler{Logger: func(string, ...any) {}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	done := make(chan struct{})
 	go func() {
 		r.Run(ctx)

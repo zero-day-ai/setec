@@ -125,7 +125,8 @@ func main() {
 	flag.StringVar(&tlsKeyPath, "tls-key", "",
 		"Phase 3: path to the PEM-encoded server private key. Required when --grpc-listen-addr is non-empty.")
 	flag.StringVar(&tlsClientCAPath, "tls-client-ca", "",
-		"Phase 3: path to the PEM-encoded CA used to verify operator client certificates. Required when --grpc-listen-addr is non-empty.")
+		"Phase 3: path to the PEM-encoded CA used to verify operator client certificates."+
+			" Required when --grpc-listen-addr is non-empty.")
 	flag.StringVar(&snapshotBackend, "snapshot-backend", "local-disk",
 		"Phase 3: storage backend identifier. Only local-disk is supported in Phase 3.")
 	flag.StringVar(&snapshotRoot, "snapshot-root", "/var/lib/setec/snapshots",
@@ -206,7 +207,9 @@ func main() {
 	// --grpc-listen-addr to a non-empty value, which is the default).
 	if grpcListenAddr != "" {
 		if snapshotBackend != "local-disk" {
-			fmt.Fprintf(os.Stderr, "node-agent: unsupported snapshot backend %q; only local-disk is supported in Phase 3\n", snapshotBackend)
+			fmt.Fprintf(os.Stderr,
+				"node-agent: unsupported snapshot backend %q; only local-disk is supported in Phase 3\n",
+				snapshotBackend)
 			os.Exit(1)
 		}
 		if err := os.MkdirAll(snapshotRoot, 0o700); err != nil {
@@ -353,15 +356,15 @@ func grpcTLS(certPath, keyPath, clientCAPath string) grpc.ServerOption {
 		fmt.Fprintf(os.Stderr, "node-agent: read client-ca: %v\n", err)
 		os.Exit(1)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caBytes) {
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(caBytes) {
 		fmt.Fprintf(os.Stderr, "node-agent: client-ca file contains no usable certificates\n")
 		os.Exit(1)
 	}
 	return grpc.Creds(credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pool,
+		ClientCAs:    certPool,
 		MinVersion:   tls.VersionTLS13,
 	}))
 }

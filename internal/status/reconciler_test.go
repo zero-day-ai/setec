@@ -767,7 +767,6 @@ func TestDerive_NoReverseTransitions(t *testing.T) {
 
 	for _, phase := range terminal {
 		for podName, pod := range pods {
-			phase, pod, podName := phase, pod, podName
 			t.Run(string(phase)+"/"+podName, func(t *testing.T) {
 				t.Parallel()
 				sb := newSandbox(withStatus(setecv1alpha1.SandboxStatus{
@@ -893,7 +892,6 @@ func TestDerive_Phase3CoordinatorPhasesPassthrough(t *testing.T) {
 		setecv1alpha1.SandboxPhaseRestoring,
 	}
 	for _, phase := range cases {
-		phase := phase
 		t.Run(string(phase), func(t *testing.T) {
 			t.Parallel()
 			sb := newSandbox(withStatus(setecv1alpha1.SandboxStatus{

@@ -74,7 +74,7 @@ func (d *GVisorDispatcher) RuntimeClassName() string { return d.cfg.RuntimeClass
 // NodeAffinity implements Dispatcher.  It requires the node label
 // setec.zero-day.ai/runtime.gvisor=true and kubernetes.io/os=linux.
 func (d *GVisorDispatcher) NodeAffinity() *corev1.NodeAffinity {
-	return requiredRuntimeNodeAffinity(runtimeAffinityLabel(BackendGVisor), "true")
+	return requiredRuntimeNodeAffinity(runtimeAffinityLabel(BackendGVisor))
 }
 
 // Overhead implements Dispatcher.  Returns BackendConfig.DefaultOverhead when

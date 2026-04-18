@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -241,7 +242,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// manually-created CR skipping admission must not silently produce a
 	// Pod that violates the class ceiling.
 	if classResolved {
-		for _, v := range class.Validate(sb, cls) {
+		if violations := class.Validate(sb, cls); len(violations) > 0 {
+			v := violations[0]
 			r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonConstraintViolated, v.String())
 			if err := r.patchPendingStatus(ctx, sb, eventReasonConstraintViolated); err != nil {
 				return ctrl.Result{}, fmt.Errorf("patch ConstraintViolated status: %w", err)
@@ -254,35 +256,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// (5b) Phase 3: if snapshotRef is set, resolve and validate the
 	// referenced Snapshot BEFORE the Pod is created. A missing snapshot
 	// keeps the Sandbox Pending; an incompatible snapshot fails.
-	var pinnedNode string
-	if sb.Spec.SnapshotRef != nil && sb.Spec.SnapshotRef.Name != "" {
-		snap := &setecv1alpha1.Snapshot{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: sb.Spec.SnapshotRef.Name}, snap)
-		switch {
-		case apierrors.IsNotFound(err):
-			r.Recorder.Eventf(sb, corev1.EventTypeWarning, eventReasonSnapshotUnavailable,
-				"Snapshot %q not found in namespace %q", sb.Spec.SnapshotRef.Name, sb.Namespace)
-			if perr := r.patchPendingStatus(ctx, sb, eventReasonSnapshotUnavailable); perr != nil {
-				return ctrl.Result{}, fmt.Errorf("patch SnapshotUnavailable status: %w", perr)
-			}
-			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
-		case err != nil:
-			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("get Snapshot: %w", err))
-		}
-		if snap.Status.Phase != setecv1alpha1.SnapshotPhaseReady {
-			if perr := r.patchPendingStatus(ctx, sb, eventReasonSnapshotUnavailable); perr != nil {
-				return ctrl.Result{}, fmt.Errorf("patch Pending(SnapshotUnavailable): %w", perr)
-			}
-			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
-		}
-		for _, v := range snapshot.Validate(sb, snap, cls) {
-			r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonSnapshotIncompatible, v.String())
-			if perr := r.patchPendingStatus(ctx, sb, eventReasonSnapshotIncompatible); perr != nil {
-				return ctrl.Result{}, fmt.Errorf("patch SnapshotIncompatible status: %w", perr)
-			}
-			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
-		}
-		pinnedNode = snap.Spec.Node
+	pinnedNode, res, err := r.resolveSnapshotRef(ctx, sb, cls)
+	if err != nil || res.RequeueAfter > 0 {
+		return res, err
 	}
 
 	// (6) Compute the deterministic Pod name.
@@ -291,8 +267,112 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// (7) Verify cluster prerequisites. Missing RuntimeClasses are not errors —
 	// they are cluster-configuration issues the operator surfaces via Events
 	// so `kubectl describe sandbox` shows remediation guidance.
-	// When Runtimes/RuntimeCfg are set (new path) we check all enabled backends;
-	// when they are nil we fall back to the legacy single-class check for back-compat.
+	if res, err := r.checkPrereqs(ctx, sb); err != nil || res.RequeueAfter > 0 {
+		return res, err
+	}
+
+	// (8) Fetch the owned Pod and reconcile it. If the Pod does not exist,
+	// createOrSkip handles creation (or skips for terminal Sandboxes).
+	// If the Pod already exists, reconcileExistingPod handles status,
+	// networking, and lifecycle transitions.
+	pod := &corev1.Pod{}
+	err = r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod)
+	if apierrors.IsNotFound(err) {
+		return r.handleMissingPod(ctx, logger, sb, cls, pinnedNode)
+	}
+	if err != nil {
+		return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("get Pod %q: %w", podName, err))
+	}
+	return r.reconcileExistingPod(ctx, span, sb, cls, pod, prevPhase, tenantID)
+}
+
+// handleMissingPod is called when the owned Pod does not yet exist. It skips
+// creation for terminal Sandboxes and otherwise selects a runtime, creates the
+// Pod, and applies the NetworkPolicy.
+func (r *SandboxReconciler) handleMissingPod(
+	ctx context.Context,
+	logger logr.Logger,
+	sb *setecv1alpha1.Sandbox,
+	cls *setecv1alpha1.SandboxClass,
+	pinnedNode string,
+) (ctrl.Result, error) {
+	if isTerminalPhase(sb.Status.Phase) {
+		logger.V(1).Info("Sandbox is terminal; not recreating Pod", "phase", sb.Status.Phase)
+		return ctrl.Result{}, nil
+	}
+	sel, selErr := r.selectRuntime(ctx, sb, cls)
+	if selErr != nil {
+		if errors.Is(selErr, runtimepkg.ErrNoEligibleRuntime) {
+			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+		}
+		return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("select runtime: %w", selErr))
+	}
+	if res, err := r.createPod(ctx, sb, cls, pinnedNode, sel); err != nil || res.RequeueAfter > 0 {
+		return res, err
+	}
+	return r.applyNetworkPolicy(ctx, sb)
+}
+
+// reconcileExistingPod handles the case where the owned Pod already exists:
+// it ensures the NetworkPolicy, derives and patches Sandbox status, records
+// metrics/span, and handles lifecycle transitions (Phase 3) and timeout deletes.
+func (r *SandboxReconciler) reconcileExistingPod(
+	ctx context.Context,
+	span trace.Span,
+	sb *setecv1alpha1.Sandbox,
+	cls *setecv1alpha1.SandboxClass,
+	pod *corev1.Pod,
+	prevPhase setecv1alpha1.SandboxPhase,
+	tenantID string,
+) (ctrl.Result, error) {
+	// (9) Ensure NetworkPolicy (idempotent).
+	if _, err := r.applyNetworkPolicy(ctx, sb); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// (10) Derive status and patch when changed.
+	desired := status.Derive(sb, pod, time.Now())
+	if !statusEqual(sb.Status, desired) {
+		original := sb.DeepCopy()
+		sb.Status = desired
+		if err := r.Status().Patch(ctx, sb, client.MergeFrom(original)); err != nil {
+			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("patch Sandbox status: %w", err))
+		}
+	}
+
+	// (11) Record phase transition metrics and span status.
+	r.recordTransition(sb, cls, prevPhase, desired, pod, tenantID)
+
+	// (11a) Phase 3: pause/resume lifecycle.
+	if r.Coordinator != nil {
+		if res, err := r.reconcilePhase3Lifecycle(ctx, sb, desired); err != nil || res.RequeueAfter > 0 {
+			return res, err
+		}
+	}
+
+	// (12) Delete timed-out Pod (guard against repeated deletes).
+	if desired.Phase == setecv1alpha1.SandboxPhaseFailed &&
+		desired.Reason == status.ReasonTimeout &&
+		pod.DeletionTimestamp.IsZero() {
+		r.Recorder.Eventf(sb, corev1.EventTypeWarning, eventReasonTimeout,
+			"Sandbox exceeded lifecycle.timeout; deleting Pod %q", pod.Name)
+		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("delete Pod after timeout: %w", err))
+		}
+	}
+
+	span.SetAttributes(attribute.String("setec.sandbox.phase", string(desired.Phase)))
+	if desired.Phase == setecv1alpha1.SandboxPhaseFailed {
+		span.SetStatus(codes.Error, desired.Reason)
+	}
+	return ctrl.Result{}, nil
+}
+
+// checkPrereqs verifies that the required RuntimeClass(es) exist in the cluster.
+// When Runtimes/RuntimeCfg are set (multi-backend path) it checks all enabled
+// backends; otherwise it falls back to the legacy single-class check.
+// Returns a non-zero RequeueAfter result when prerequisites are not yet met.
+func (r *SandboxReconciler) checkPrereqs(ctx context.Context, sb *setecv1alpha1.Sandbox) (ctrl.Result, error) {
 	if r.Runtimes != nil && r.RuntimeCfg != nil {
 		classNames := make(map[string]string, len(r.RuntimeCfg.Runtimes))
 		for name, bc := range r.RuntimeCfg.Runtimes {
@@ -305,7 +385,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("prereq check: %w", err))
 		}
 		if !prereqResult.RuntimeClassPresent {
-			// Use the first warning as the event message; it names the offending backend.
 			msg := runtimeUnavailableMessage
 			if len(prereqResult.Warnings) > 0 {
 				msg = prereqResult.Warnings[0]
@@ -316,111 +395,70 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
 		}
-	} else {
-		// Legacy path: single-class check with the operator-wide default.
-		legacyClassName := ""
-		if r.RuntimeCfg != nil {
-			legacyClassName = r.RuntimeCfg.Defaults.Runtime.Backend
-		}
-		prereqResult, err := prereq.Check(ctx, r.Client, legacyClassName, r.NodeSelectorLabel)
-		if err != nil {
-			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("prereq check: %w", err))
-		}
-		if !prereqResult.RuntimeClassPresent {
-			msg := fmt.Sprintf(runtimeUnavailableMessage, legacyClassName)
-			r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonRuntimeUnavailable, msg)
-			if err := r.patchPendingStatus(ctx, sb, eventReasonRuntimeUnavailable); err != nil {
-				return ctrl.Result{}, fmt.Errorf("patch RuntimeUnavailable status: %w", err)
-			}
-			return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
-		}
+		return ctrl.Result{}, nil
 	}
-
-	// (8) Fetch the owned Pod. If it does not exist and the Sandbox has
-	// not yet reached a terminal phase, create it. Terminal phases
-	// short-circuit here so a completed or failed Sandbox does not respawn
-	// its Pod after Kubernetes garbage-collects it.
-	pod := &corev1.Pod{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod)
-	switch {
-	case apierrors.IsNotFound(err):
-		if isTerminalPhase(sb.Status.Phase) {
-			logger.V(1).Info("Sandbox is terminal; not recreating Pod", "phase", sb.Status.Phase)
-			return ctrl.Result{}, nil
-		}
-		// Select the runtime backend for this Sandbox.
-		sel, selErr := r.selectRuntime(ctx, sb, cls)
-		if selErr != nil {
-			if errors.Is(selErr, runtimepkg.ErrNoEligibleRuntime) {
-				// Already transitioned to Failed inside selectRuntime; requeue
-				// slowly in case node labels change.
-				return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
-			}
-			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("select runtime: %w", selErr))
-		}
-		if res, err := r.createPod(ctx, sb, cls, pinnedNode, sel); err != nil || res.RequeueAfter > 0 {
-			return res, err
-		}
-		// Fall through to netpol reconciliation and status convergence
-		// on the next loop; a freshly-created Pod has no usable status yet.
-		return r.applyNetworkPolicy(ctx, sb)
-
-	case err != nil:
-		return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("get Pod %q: %w", podName, err))
+	// Legacy path: single-class check with the operator-wide default.
+	legacyClassName := ""
+	if r.RuntimeCfg != nil {
+		legacyClassName = r.RuntimeCfg.Defaults.Runtime.Backend
 	}
-
-	// (9) Phase 2: ensure NetworkPolicy. Safe to call every reconcile —
-	// applyNetworkPolicy is idempotent: it no-ops when the existing
-	// policy already matches the desired shape.
-	if _, err := r.applyNetworkPolicy(ctx, sb); err != nil {
-		return ctrl.Result{}, err
+	prereqResult, err := prereq.Check(ctx, r.Client, legacyClassName, r.NodeSelectorLabel)
+	if err != nil {
+		return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("prereq check: %w", err))
 	}
-
-	// (10) Pod exists — derive the desired status from the live Pod and
-	// patch the Sandbox status subresource only when the derivation
-	// produces a different value than what is already persisted.
-	desired := status.Derive(sb, pod, time.Now())
-	if !statusEqual(sb.Status, desired) {
-		original := sb.DeepCopy()
-		sb.Status = desired
-		if err := r.Status().Patch(ctx, sb, client.MergeFrom(original)); err != nil {
-			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("patch Sandbox status: %w", err))
+	if !prereqResult.RuntimeClassPresent {
+		msg := fmt.Sprintf(runtimeUnavailableMessage, legacyClassName)
+		r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonRuntimeUnavailable, msg)
+		if err := r.patchPendingStatus(ctx, sb, eventReasonRuntimeUnavailable); err != nil {
+			return ctrl.Result{}, fmt.Errorf("patch RuntimeUnavailable status: %w", err)
 		}
+		return ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
 	}
-
-	// (11) Phase 2: record phase transition metrics and span status.
-	r.recordTransition(sb, cls, prevPhase, desired, pod, tenantID)
-
-	// (11a) Phase 3: pause/resume branches. These only run when a
-	// Coordinator is wired AND the Sandbox has stabilized to Running
-	// (or is already Paused). Coordinator is nil on Phase 1/2 installs,
-	// which preserves full back-compat.
-	if r.Coordinator != nil {
-		if res, err := r.reconcilePhase3Lifecycle(ctx, sb, desired); err != nil || res.RequeueAfter > 0 {
-			return res, err
-		}
-	}
-
-	// (12) If the derived status indicates Timeout, delete the Pod. The
-	// DeletionTimestamp guard ensures we do not repeatedly issue deletes
-	// against a Pod the API server is already tearing down.
-	if desired.Phase == setecv1alpha1.SandboxPhaseFailed &&
-		desired.Reason == status.ReasonTimeout &&
-		pod.DeletionTimestamp.IsZero() {
-		r.Recorder.Eventf(sb, corev1.EventTypeWarning, eventReasonTimeout,
-			"Sandbox exceeded lifecycle.timeout; deleting Pod %q", pod.Name)
-		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			return r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("delete Pod after timeout: %w", err))
-		}
-	}
-
-	// Annotate the span with the terminal phase (or the current one).
-	span.SetAttributes(attribute.String("setec.sandbox.phase", string(desired.Phase)))
-	if desired.Phase == setecv1alpha1.SandboxPhaseFailed {
-		span.SetStatus(codes.Error, desired.Reason)
-	}
-
 	return ctrl.Result{}, nil
+}
+
+// resolveSnapshotRef resolves and validates the Snapshot referenced by
+// sb.Spec.SnapshotRef when set. Returns the pinned node name from the snapshot,
+// or a non-zero RequeueAfter result when the snapshot is unavailable or
+// incompatible. Returns an empty node name and zero result when no snapshotRef
+// is set.
+func (r *SandboxReconciler) resolveSnapshotRef(
+	ctx context.Context,
+	sb *setecv1alpha1.Sandbox,
+	cls *setecv1alpha1.SandboxClass,
+) (pinnedNode string, result ctrl.Result, err error) {
+	if sb.Spec.SnapshotRef == nil || sb.Spec.SnapshotRef.Name == "" {
+		return "", ctrl.Result{}, nil
+	}
+	snap := &setecv1alpha1.Snapshot{}
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: sb.Spec.SnapshotRef.Name}, snap)
+	switch {
+	case apierrors.IsNotFound(getErr):
+		r.Recorder.Eventf(sb, corev1.EventTypeWarning, eventReasonSnapshotUnavailable,
+			"Snapshot %q not found in namespace %q", sb.Spec.SnapshotRef.Name, sb.Namespace)
+		if perr := r.patchPendingStatus(ctx, sb, eventReasonSnapshotUnavailable); perr != nil {
+			return "", ctrl.Result{}, fmt.Errorf("patch SnapshotUnavailable status: %w", perr)
+		}
+		return "", ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+	case getErr != nil:
+		res, rerr := r.recordAndReturnErr(sb, eventReasonReconcileError, fmt.Errorf("get Snapshot: %w", getErr))
+		return "", res, rerr
+	}
+	if snap.Status.Phase != setecv1alpha1.SnapshotPhaseReady {
+		if perr := r.patchPendingStatus(ctx, sb, eventReasonSnapshotUnavailable); perr != nil {
+			return "", ctrl.Result{}, fmt.Errorf("patch Pending(SnapshotUnavailable): %w", perr)
+		}
+		return "", ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+	}
+	if snapViolations := snapshot.Validate(sb, snap, cls); len(snapViolations) > 0 {
+		sv := snapViolations[0]
+		r.Recorder.Event(sb, corev1.EventTypeWarning, eventReasonSnapshotIncompatible, sv.String())
+		if perr := r.patchPendingStatus(ctx, sb, eventReasonSnapshotIncompatible); perr != nil {
+			return "", ctrl.Result{}, fmt.Errorf("patch SnapshotIncompatible status: %w", perr)
+		}
+		return "", ctrl.Result{RequeueAfter: runtimeUnavailableRequeue}, nil
+	}
+	return snap.Spec.Node, ctrl.Result{}, nil
 }
 
 // selectRuntime picks the isolation backend for this Sandbox by gathering a
@@ -445,8 +483,8 @@ func (r *SandboxReconciler) selectRuntime(
 	// stays backward-compatible without a registry.
 	if r.Runtimes == nil || r.RuntimeCfg == nil {
 		rcName := ""
-		if cls != nil && cls.Spec.RuntimeClassName != "" {
-			rcName = cls.Spec.RuntimeClassName
+		if cls != nil && cls.Spec.RuntimeClassName != "" { //nolint:staticcheck // back-compat: RuntimeClassName retained until v2
+			rcName = cls.Spec.RuntimeClassName //nolint:staticcheck // back-compat: RuntimeClassName retained until v2
 		}
 		// Build a minimal inline dispatcher that only supplies the RuntimeClass name.
 		return &runtimepkg.Selection{
@@ -660,7 +698,7 @@ func (r *SandboxReconciler) recordTransition(
 	vmm := ""
 	if cls != nil {
 		className = cls.Name
-		vmm = string(cls.Spec.VMM)
+		vmm = string(cls.Spec.VMM) //nolint:staticcheck // back-compat: VMM retained until v2
 	}
 	// Determine the runtime label: prefer status.runtime.chosen (written by
 	// selectRuntime), fall back to the legacy VMM field for backward compat.
@@ -732,8 +770,8 @@ func (r *SandboxReconciler) createPod(
 	if sel != nil {
 		rcName = sel.Dispatcher.RuntimeClassName()
 	}
-	if rcName == "" && cls != nil && cls.Spec.RuntimeClassName != "" {
-		rcName = cls.Spec.RuntimeClassName
+	if rcName == "" && cls != nil && cls.Spec.RuntimeClassName != "" { //nolint:staticcheck // back-compat: RuntimeClassName retained until v2
+		rcName = cls.Spec.RuntimeClassName //nolint:staticcheck // back-compat: RuntimeClassName retained until v2
 	}
 
 	opts := podspec.BuildOptions{NodeName: nodeName}

@@ -107,7 +107,7 @@ func (v *SnapshotValidator) validate(ctx context.Context, snap *setecv1alpha1.Sn
 		switch {
 		case err == nil:
 			errs = append(errs, fmt.Errorf(
-				"Snapshot %q already exists in namespace %q", snap.Name, snap.Namespace))
+				"snapshot %q already exists in namespace %q", snap.Name, snap.Namespace))
 		case !apierrors.IsNotFound(err):
 			return nil, fmt.Errorf("webhook: check duplicate Snapshot: %w", err)
 		}
@@ -176,10 +176,10 @@ func (v *SnapshotValidator) SetupWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// minSnapshotTTLError is a sentinel so tests can errors.Is against
+// errMinSnapshotTTL is a sentinel so tests can errors.Is against
 // a stable value when asserting the TTL rule.
-var minSnapshotTTLError = errors.New("snapshot ttl below minimum")
+var errMinSnapshotTTL = errors.New("snapshot ttl below minimum")
 
 // Ensure the sentinel is referenced so linters do not flag it as
 // unused when the downstream tests migrate to errors.Is.
-var _ = minSnapshotTTLError
+var _ = errMinSnapshotTTL

@@ -161,7 +161,8 @@ func main() {
 
 	// Phase 3 flags.
 	pflag.BoolVar(&snapshotsEnabled, "snapshots-enabled", false,
-		"Phase 3 kill-switch: register the Snapshot CRD controller and wire snapshot.Coordinator for the Sandbox reconciler. Default false preserves Phase 2 behaviour.")
+		"Phase 3 kill-switch: register the Snapshot CRD controller and wire snapshot.Coordinator"+
+			" for the Sandbox reconciler. Default false preserves Phase 2 behaviour.")
 	pflag.StringVar(&nodeAgentEndpoint, "nodeagent-endpoint-pattern",
 		"%s.setec-node-agent.setec-system.svc:50052",
 		"Phase 3: format string that renders a dial target from a node name. %s is substituted with Pod.Spec.NodeName.")

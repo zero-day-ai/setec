@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -277,12 +278,7 @@ func TestSnapshotFinalizer_BlocksDeleteWhileReferenced(t *testing.T) {
 		if err := testClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "snap-1"}, got); err != nil {
 			return false
 		}
-		for _, f := range got.Finalizers {
-			if f == setecv1alpha1.SnapshotInUseFinalizer {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(got.Finalizers, setecv1alpha1.SnapshotInUseFinalizer)
 	}, 10*time.Second, 250*time.Millisecond).Should(gomega.BeTrue(), "expected finalizer to be present")
 
 	// Deletion is blocked while refCount>0.
@@ -315,12 +311,7 @@ func TestSnapshotFinalizer_AllowsDeleteWhenFree(t *testing.T) {
 	g.Eventually(func() bool {
 		got := &setecv1alpha1.Snapshot{}
 		_ = testClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "solo"}, got)
-		for _, f := range got.Finalizers {
-			if f == setecv1alpha1.SnapshotInUseFinalizer {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(got.Finalizers, setecv1alpha1.SnapshotInUseFinalizer)
 	}, 10*time.Second, 250*time.Millisecond).Should(gomega.BeTrue())
 
 	// Delete and confirm removal.

@@ -121,9 +121,9 @@ func newFakeClient(t *testing.T, objs ...client.Object) client.Client {
 
 // newSandboxForCoord returns a Sandbox with a snapshot-create intent
 // plus a backing Pod that's scheduled to node-a.
-func newSandboxForCoord(ns, name string) *setecv1alpha1.Sandbox {
+func newSandboxForCoord() *setecv1alpha1.Sandbox {
 	return &setecv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "t-a", Name: "s"},
 		Spec: setecv1alpha1.SandboxSpec{
 			SandboxClassName: "standard",
 			Image:            "ghcr.io/org/app:v1",
@@ -134,7 +134,7 @@ func newSandboxForCoord(ns, name string) *setecv1alpha1.Sandbox {
 			},
 		},
 		Status: setecv1alpha1.SandboxStatus{
-			PodName: name + "-vm",
+			PodName: "s-vm",
 			Phase:   setecv1alpha1.SandboxPhaseRunning,
 		},
 	}
@@ -171,7 +171,7 @@ func newCoord(c client.Client, dialer NodeAgentDialer) *Coordinator {
 // --- actual tests --------------------------------------------------
 
 func TestCreateSnapshot_Happy(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	na := &fakeNodeAgentClient{
@@ -213,7 +213,7 @@ func TestCreateSnapshot_Happy(t *testing.T) {
 }
 
 func TestCreateSnapshot_NameConflict(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	existing := &setecv1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "t-a", Name: "snap-1"},
@@ -236,7 +236,7 @@ func TestCreateSnapshot_NameConflict(t *testing.T) {
 }
 
 func TestCreateSnapshot_RPCError(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	na := &fakeNodeAgentClient{createErr: errors.New("fc: pause failed")}
@@ -254,7 +254,7 @@ func TestCreateSnapshot_RPCError(t *testing.T) {
 }
 
 func TestCreateSnapshot_InsufficientStorage(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	na := &fakeNodeAgentClient{createErr: errors.New("wrapped: " + storage.ErrInsufficientStorage.Error())}
@@ -277,7 +277,7 @@ func TestCreateSnapshot_InsufficientStorage(t *testing.T) {
 }
 
 func TestCreateSnapshot_DialFailureUnreachable(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	coord := newCoord(c, &fakeDialer{dialErr: errors.New("conn refused")})
@@ -288,7 +288,7 @@ func TestCreateSnapshot_DialFailureUnreachable(t *testing.T) {
 }
 
 func TestCreateSnapshot_PodNotScheduled(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "") // no NodeName
 	c := newFakeClient(t, sb, pod)
 	coord := newCoord(c, &fakeDialer{client: &fakeNodeAgentClient{}})
@@ -298,7 +298,7 @@ func TestCreateSnapshot_PodNotScheduled(t *testing.T) {
 }
 
 func TestCreateSnapshot_MissingPod(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	c := newFakeClient(t, sb)
 	coord := newCoord(c, &fakeDialer{client: &fakeNodeAgentClient{}})
 	if err := coord.CreateSnapshot(context.Background(), sb); err == nil {
@@ -307,7 +307,7 @@ func TestCreateSnapshot_MissingPod(t *testing.T) {
 }
 
 func TestCreateSnapshot_RequiresSnapshotName(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	sb.Spec.Snapshot.Name = ""
 	c := newFakeClient(t, sb)
 	coord := newCoord(c, &fakeDialer{client: &fakeNodeAgentClient{}})
@@ -317,7 +317,7 @@ func TestCreateSnapshot_RequiresSnapshotName(t *testing.T) {
 }
 
 func TestRestoreSandbox_Happy(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	snap := &setecv1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "t-a", Name: "snap-1"},
@@ -342,7 +342,7 @@ func TestRestoreSandbox_Happy(t *testing.T) {
 }
 
 func TestRestoreSandbox_NodeMismatch(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	snap := &setecv1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "t-a", Name: "snap-1"},
@@ -356,7 +356,7 @@ func TestRestoreSandbox_NodeMismatch(t *testing.T) {
 }
 
 func TestRestoreSandbox_RPCError(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	snap := &setecv1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "t-a", Name: "snap-1"},
@@ -381,7 +381,7 @@ func TestRestoreSandbox_NilInputs(t *testing.T) {
 }
 
 func TestPauseSandbox_Happy(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	na := &fakeNodeAgentClient{pauseRes: &setecgrpcv1alpha1.PauseSandboxResponse{Success: true}}
@@ -395,7 +395,7 @@ func TestPauseSandbox_Happy(t *testing.T) {
 }
 
 func TestPauseSandbox_Failure(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	na := &fakeNodeAgentClient{pauseRes: &setecgrpcv1alpha1.PauseSandboxResponse{Success: false, Error: "vm creating"}}
@@ -406,7 +406,7 @@ func TestPauseSandbox_Failure(t *testing.T) {
 }
 
 func TestResumeSandbox_Happy(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	na := &fakeNodeAgentClient{resumeRes: &setecgrpcv1alpha1.ResumeSandboxResponse{Success: true}}
@@ -417,7 +417,7 @@ func TestResumeSandbox_Happy(t *testing.T) {
 }
 
 func TestResumeSandbox_Failure(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	na := &fakeNodeAgentClient{resumeRes: &setecgrpcv1alpha1.ResumeSandboxResponse{Success: false, Error: "corrupt"}}
@@ -428,7 +428,7 @@ func TestResumeSandbox_Failure(t *testing.T) {
 }
 
 func TestResumeSandbox_DialFailure(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	coord := newCoord(c, &fakeDialer{dialErr: errors.New("no route")})
@@ -438,7 +438,7 @@ func TestResumeSandbox_DialFailure(t *testing.T) {
 }
 
 func TestPauseSandbox_DialFailure(t *testing.T) {
-	sb := newSandboxForCoord("t-a", "s")
+	sb := newSandboxForCoord()
 	pod := newPodForSandbox(sb, "node-a")
 	c := newFakeClient(t, sb, pod)
 	coord := newCoord(c, &fakeDialer{dialErr: errors.New("no route")})

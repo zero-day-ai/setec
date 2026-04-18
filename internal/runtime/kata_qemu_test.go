@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"errors"
+	"maps"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -66,13 +67,13 @@ func TestKataQEMUDispatcher_NodeAffinity(t *testing.T) {
 	if exprs[0].Operator != corev1.NodeSelectorOpIn {
 		t.Errorf("MatchExpressions[0].Operator = %q, want In", exprs[0].Operator)
 	}
-	if len(exprs[0].Values) != 1 || exprs[0].Values[0] != "true" {
+	if len(exprs[0].Values) != 1 || exprs[0].Values[0] != testAffinityTrue {
 		t.Errorf("MatchExpressions[0].Values = %v, want [true]", exprs[0].Values)
 	}
-	if exprs[1].Key != "kubernetes.io/os" {
+	if exprs[1].Key != testAffinityOS {
 		t.Errorf("MatchExpressions[1].Key = %q, want kubernetes.io/os", exprs[1].Key)
 	}
-	if len(exprs[1].Values) != 1 || exprs[1].Values[0] != "linux" {
+	if len(exprs[1].Values) != 1 || exprs[1].Values[0] != testAffinityLinux {
 		t.Errorf("MatchExpressions[1].Values = %v, want [linux]", exprs[1].Values)
 	}
 }
@@ -117,11 +118,11 @@ func TestKataQEMUDispatcher_MutatePod(t *testing.T) {
 	cfg := BackendConfig{RuntimeClassName: "kata-qemu"}
 
 	tests := []struct {
-		name          string
-		params        map[string]string
-		wantAnno      map[string]string // expected annotations after mutation
-		wantErrIs     error
-		wantNoMutate  bool // pod must remain unmutated when an error is expected
+		name         string
+		params       map[string]string
+		wantAnno     map[string]string // expected annotations after mutation
+		wantErrIs    error
+		wantNoMutate bool // pod must remain unmutated when an error is expected
 	}{
 		{
 			name:     "no params — no annotations added",
@@ -213,9 +214,7 @@ func TestKataQEMUDispatcher_MutatePod_Idempotent(t *testing.T) {
 		t.Fatalf("first MutatePod: %v", err)
 	}
 	firstAnno := make(map[string]string, len(pod.Annotations))
-	for k, v := range pod.Annotations {
-		firstAnno[k] = v
-	}
+	maps.Copy(firstAnno, pod.Annotations)
 
 	if err := d.MutatePod(pod, params); err != nil {
 		t.Fatalf("second MutatePod: %v", err)

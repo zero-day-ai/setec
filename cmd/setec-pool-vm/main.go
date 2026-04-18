@@ -91,18 +91,24 @@ type Options struct {
 func parseFlags(args []string) (Options, error) {
 	fs := flag.NewFlagSet("setec-pool-vm", flag.ContinueOnError)
 	var o Options
-	fs.StringVar(&o.ImageRef, "image-ref", "", "OCI image reference the VM runs (recorded for the pool entry; the rootfs must already be extracted on disk)")
+	fs.StringVar(&o.ImageRef, "image-ref", "",
+		"OCI image reference the VM runs (recorded for the pool entry; the rootfs must already be extracted on disk)")
 	fs.StringVar(&o.KernelPath, "kernel-path", "", "path to the uncompressed Linux kernel image")
 	fs.StringVar(&o.RootfsPath, "rootfs-path", "", "path to the rootfs image or block device")
 	fs.IntVar(&o.VCPUs, "vcpus", 1, "vCPUs allocated to the microVM")
 	fs.IntVar(&o.MemoryMiB, "memory-mib", 512, "memory allocated to the microVM, in MiB")
-	fs.StringVar(&o.SocketPath, "socket-path", "", "absolute path where Firecracker should expose its API socket (pre-existing files are removed)")
+	fs.StringVar(&o.SocketPath, "socket-path", "",
+		"absolute path where Firecracker should expose its API socket (pre-existing files are removed)")
 	fs.StringVar(&o.StorageRoot, "storage-root", "", "root directory under which pool entry state is written")
 	fs.StringVar(&o.PoolEntryID, "pool-entry-id", "", "stable identifier for this entry (becomes <storage-root>/<id>/)")
-	fs.StringVar(&o.FirecrackerBinary, "firecracker-binary", defaultFirecrackerBinary, "path to the firecracker binary to exec")
-	fs.DurationVar(&o.BootReadyTimeout, "boot-ready-timeout", 30*time.Second, "maximum time to wait for the Firecracker API socket to accept requests")
-	fs.DurationVar(&o.ShutdownGracePause, "shutdown-grace", 5*time.Second, "how long to wait after SIGTERM before SIGKILL on cleanup")
-	fs.StringVar(&o.BootArgs, "boot-args", "console=ttyS0 reboot=k panic=1 pci=off", "kernel cmdline passed via boot-source")
+	fs.StringVar(&o.FirecrackerBinary, "firecracker-binary", defaultFirecrackerBinary,
+		"path to the firecracker binary to exec")
+	fs.DurationVar(&o.BootReadyTimeout, "boot-ready-timeout", 30*time.Second,
+		"maximum time to wait for the Firecracker API socket to accept requests")
+	fs.DurationVar(&o.ShutdownGracePause, "shutdown-grace", 5*time.Second,
+		"how long to wait after SIGTERM before SIGKILL on cleanup")
+	fs.StringVar(&o.BootArgs, "boot-args", "console=ttyS0 reboot=k panic=1 pci=off",
+		"kernel cmdline passed via boot-source")
 
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -288,13 +294,6 @@ func waitForSocket(ctx context.Context, path string, timeout time.Duration) erro
 	}
 }
 
-// firecrackerAPI narrows the firecracker.Client surface to the extra
-// bring-up calls that the launcher needs but that the pool Manager
-// does not. We extend via an interface-compatible concrete client.
-type firecrackerAPI interface {
-	firecracker.Client
-}
-
 // configureAndBoot walks the Firecracker REST sequence required to
 // bring a fresh VM up to the `Running` state:
 //
@@ -316,7 +315,7 @@ func configureAndBoot(ctx context.Context, _ firecracker.Client, o Options) erro
 		"kernel_image_path": o.KernelPath,
 		"boot_args":         o.BootArgs,
 	}
-	if err := ec.do(ctx, "PUT", "/boot-source", bootBody); err != nil {
+	if err := ec.do(ctx, "/boot-source", bootBody); err != nil {
 		return fmt.Errorf("/boot-source: %w", err)
 	}
 
@@ -326,7 +325,7 @@ func configureAndBoot(ctx context.Context, _ firecracker.Client, o Options) erro
 		"is_root_device": true,
 		"is_read_only":   false,
 	}
-	if err := ec.do(ctx, "PUT", "/drives/rootfs", driveBody); err != nil {
+	if err := ec.do(ctx, "/drives/rootfs", driveBody); err != nil {
 		return fmt.Errorf("/drives/rootfs: %w", err)
 	}
 
@@ -334,12 +333,12 @@ func configureAndBoot(ctx context.Context, _ firecracker.Client, o Options) erro
 		"vcpu_count":   o.VCPUs,
 		"mem_size_mib": o.MemoryMiB,
 	}
-	if err := ec.do(ctx, "PUT", "/machine-config", machineBody); err != nil {
+	if err := ec.do(ctx, "/machine-config", machineBody); err != nil {
 		return fmt.Errorf("/machine-config: %w", err)
 	}
 
 	actionBody := map[string]any{"action_type": "InstanceStart"}
-	if err := ec.do(ctx, "PUT", "/actions", actionBody); err != nil {
+	if err := ec.do(ctx, "/actions", actionBody); err != nil {
 		return fmt.Errorf("/actions InstanceStart: %w", err)
 	}
 	return nil
