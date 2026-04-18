@@ -65,9 +65,11 @@ func main() {
 	flag.StringVar(&tlsCert, "tls-cert", "", "Path to server TLS certificate. Required.")
 	flag.StringVar(&tlsKey, "tls-key", "", "Path to server TLS key. Required.")
 	flag.StringVar(&tlsClientCA, "tls-client-ca", "", "Path to client-CA bundle enabling mTLS. Required.")
-	flag.StringVar(&tenantLabelKey, "tenant-namespace-label", "setec.zero-day.ai/tenant", "Label key used to map tenant → namespace.")
+	flag.StringVar(&tenantLabelKey, "tenant-namespace-label", "setec.zero-day.ai/tenant",
+		"Label key used to map tenant → namespace.")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":9091", "HTTP address for /metrics (Prometheus scraping).")
-	flag.DurationVar(&shutdownGraceTime, "shutdown-grace", 30*time.Second, "Maximum time to wait for in-flight RPCs during graceful shutdown.")
+	flag.DurationVar(&shutdownGraceTime, "shutdown-grace", 30*time.Second,
+		"Maximum time to wait for in-flight RPCs during graceful shutdown.")
 	flag.Parse()
 
 	fmt.Fprintln(os.Stderr, "setec frontend starting")

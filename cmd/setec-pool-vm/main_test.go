@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -81,12 +82,7 @@ func (p *fakeProcess) Pid() int { return p.pid }
 func (p *fakeProcess) sentSignal(sig os.Signal) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, s := range p.signals {
-		if s == sig {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(p.signals, sig)
 }
 
 type fakeSpawner struct {
@@ -189,7 +185,7 @@ func zeroSnapshotWriter(state, mem string) error {
 	return os.WriteFile(mem, []byte{}, 0o644)
 }
 
-func tempOpts(t *testing.T) (Options, string) {
+func tempOpts(t *testing.T) Options {
 	t.Helper()
 	root := t.TempDir()
 	socketDir := t.TempDir()
@@ -209,10 +205,10 @@ func tempOpts(t *testing.T) (Options, string) {
 	}
 	_ = os.WriteFile(opts.KernelPath, []byte{0}, 0o644)
 	_ = os.WriteFile(opts.RootfsPath, []byte{0}, 0o644)
-	return opts, root
+	return opts
 }
 
-func newSpawnerWithSocket(t *testing.T, opts Options) *fakeSpawner {
+func newSpawnerWithSocket(opts Options) *fakeSpawner {
 	return &fakeSpawner{
 		socketPath:    opts.SocketPath,
 		produceSocket: true,
@@ -229,8 +225,8 @@ func factoryReturning(f *fakeFC) ClientFactory {
 // ---------------------------------------------------------------------------
 
 func TestRunLauncher_HappyPath(t *testing.T) {
-	opts, _ := tempOpts(t)
-	spawner := newSpawnerWithSocket(t, opts)
+	opts := tempOpts(t)
+	spawner := newSpawnerWithSocket(opts)
 	defer spawner.closeListener()
 	fc := &fakeFC{snapshotWriter: goodSnapshotWriter}
 
@@ -268,7 +264,7 @@ func TestRunLauncher_HappyPath(t *testing.T) {
 }
 
 func TestRunLauncher_SpawnFailure(t *testing.T) {
-	opts, _ := tempOpts(t)
+	opts := tempOpts(t)
 	spawner := &fakeSpawner{socketPath: opts.SocketPath, startErr: errors.New("exec: not found")}
 	fc := &fakeFC{}
 
@@ -284,7 +280,7 @@ func TestRunLauncher_SpawnFailure(t *testing.T) {
 }
 
 func TestRunLauncher_SocketTimeout(t *testing.T) {
-	opts, _ := tempOpts(t)
+	opts := tempOpts(t)
 	opts.BootReadyTimeout = 150 * time.Millisecond
 
 	// Spawner starts but never creates the socket.
@@ -306,8 +302,8 @@ func TestRunLauncher_SocketTimeout(t *testing.T) {
 }
 
 func TestRunLauncher_PauseFailure(t *testing.T) {
-	opts, _ := tempOpts(t)
-	spawner := newSpawnerWithSocket(t, opts)
+	opts := tempOpts(t)
+	spawner := newSpawnerWithSocket(opts)
 	defer spawner.closeListener()
 	fc := &fakeFC{pauseErr: errors.New("pause refused")}
 
@@ -327,8 +323,8 @@ func TestRunLauncher_PauseFailure(t *testing.T) {
 }
 
 func TestRunLauncher_SnapshotFailure(t *testing.T) {
-	opts, _ := tempOpts(t)
-	spawner := newSpawnerWithSocket(t, opts)
+	opts := tempOpts(t)
+	spawner := newSpawnerWithSocket(opts)
 	defer spawner.closeListener()
 	fc := &fakeFC{snapshotErr: errors.New("disk full")}
 
@@ -348,8 +344,8 @@ func TestRunLauncher_SnapshotFailure(t *testing.T) {
 }
 
 func TestRunLauncher_ZeroLengthSnapshot(t *testing.T) {
-	opts, _ := tempOpts(t)
-	spawner := newSpawnerWithSocket(t, opts)
+	opts := tempOpts(t)
+	spawner := newSpawnerWithSocket(opts)
 	defer spawner.closeListener()
 	fc := &fakeFC{snapshotWriter: zeroSnapshotWriter}
 
@@ -366,7 +362,7 @@ func TestRunLauncher_ZeroLengthSnapshot(t *testing.T) {
 }
 
 func TestRunLauncher_BringUpHTTPError(t *testing.T) {
-	opts, _ := tempOpts(t)
+	opts := tempOpts(t)
 	// Responder returns 500 for /actions.
 	mux := http.NewServeMux()
 	ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }

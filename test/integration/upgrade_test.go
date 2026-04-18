@@ -376,7 +376,8 @@ func TestUpgrade_RunningSandbox_StatusUntouched(t *testing.T) {
 
 	// Fetch back and verify the status is unchanged (REQ-6.2).
 	got := &setecv1alpha1.Sandbox{}
-	if err := upgradeClient.Get(ctx, types.NamespacedName{Namespace: "upgrade-running-test", Name: "running-sb"}, got); err != nil {
+	if err := upgradeClient.Get(ctx,
+		types.NamespacedName{Namespace: "upgrade-running-test", Name: "running-sb"}, got); err != nil {
 		t.Fatalf("get sandbox after status update: %v", err)
 	}
 	if got.Status.Phase != setecv1alpha1.SandboxPhaseRunning {

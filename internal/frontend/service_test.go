@@ -122,7 +122,6 @@ func TestLaunch_InvalidArgs(t *testing.T) {
 		}, codes.InvalidArgument},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := s.Launch(context.Background(), tc.req)
@@ -338,7 +337,7 @@ func TestStreamLogs_SandboxNotFound(t *testing.T) {
 	c := newClient(t)
 	s := &Service{
 		Client:           c,
-		Clientset:        k8sfake.NewSimpleClientset(),
+		Clientset:        k8sfake.NewSimpleClientset(), //nolint:staticcheck // NewClientset needs --with-applyconfig wiring, tracked in issue N/A
 		AuthDisabled:     true,
 		DefaultNamespace: "team-a",
 	}
@@ -363,7 +362,7 @@ func TestStreamLogs_PodNotYetCreated(t *testing.T) {
 	c := newClient(t, sb)
 	s := &Service{
 		Client:           c,
-		Clientset:        k8sfake.NewSimpleClientset(),
+		Clientset:        k8sfake.NewSimpleClientset(), //nolint:staticcheck // NewClientset needs --with-applyconfig wiring, tracked in issue N/A
 		AuthDisabled:     true,
 		DefaultNamespace: "team-a",
 	}
@@ -390,7 +389,7 @@ func TestStreamLogs_HappyPath(t *testing.T) {
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 	c := newClient(t, sb, pod)
-	cs := k8sfake.NewSimpleClientset(pod)
+	cs := k8sfake.NewSimpleClientset(pod) //nolint:staticcheck // NewClientset needs --with-applyconfig wiring, tracked in issue N/A
 
 	s := &Service{
 		Client:           c,
@@ -439,7 +438,7 @@ func TestStreamLogs_ClientCancel(t *testing.T) {
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 	c := newClient(t, sb, pod)
-	cs := k8sfake.NewSimpleClientset(pod)
+	cs := k8sfake.NewSimpleClientset(pod) //nolint:staticcheck // NewClientset needs --with-applyconfig wiring, tracked in issue N/A
 
 	s := &Service{
 		Client:           c,
@@ -510,7 +509,7 @@ func TestStreamLogs_FollowPodTransitions(t *testing.T) {
 		Status:     corev1.PodStatus{Phase: corev1.PodPending},
 	}
 	c := newClient(t, sb, pod)
-	cs := k8sfake.NewSimpleClientset(pod)
+	cs := k8sfake.NewSimpleClientset(pod) //nolint:staticcheck // NewClientset needs --with-applyconfig wiring, tracked in issue N/A
 
 	s := &Service{
 		Client:           c,
@@ -580,9 +579,9 @@ type errorSendStream struct {
 	err error
 }
 
-func (s *errorSendStream) Context() context.Context                        { return s.ctx }
-func (s *errorSendStream) Send(_ *setecv1alpha1grpc.LogChunk) error        { return s.err }
-func errForTesting(msg string) error                                        { return &simpleErr{msg} }
+func (s *errorSendStream) Context() context.Context                 { return s.ctx }
+func (s *errorSendStream) Send(_ *setecv1alpha1grpc.LogChunk) error { return s.err }
+func errForTesting(msg string) error                                { return &simpleErr{msg} }
 
 type simpleErr struct{ s string }
 
@@ -608,7 +607,7 @@ func TestResolveNamespace_UsesResolver(t *testing.T) {
 
 func TestResolveNamespace_AuthEnabledWithCert(t *testing.T) {
 	t.Parallel()
-	cert := makeCert(t, "", []string{"tenant-a.svc"})
+	cert := makeCert(t, []string{"tenant-a.svc"})
 	ctx := ctxWithCert(cert)
 
 	s := &Service{
@@ -626,7 +625,7 @@ func TestResolveNamespace_AuthEnabledWithCert(t *testing.T) {
 
 func TestResolveNamespace_AuthEnabledNoResolver(t *testing.T) {
 	t.Parallel()
-	cert := makeCert(t, "", []string{"tenant-a.svc"})
+	cert := makeCert(t, []string{"tenant-a.svc"})
 	ctx := ctxWithCert(cert)
 
 	s := &Service{Client: newClient(t)}
@@ -638,7 +637,7 @@ func TestResolveNamespace_AuthEnabledNoResolver(t *testing.T) {
 
 func TestResolveNamespace_ResolverError(t *testing.T) {
 	t.Parallel()
-	cert := makeCert(t, "", []string{"tenant-a.svc"})
+	cert := makeCert(t, []string{"tenant-a.svc"})
 	ctx := ctxWithCert(cert)
 
 	s := &Service{
@@ -674,7 +673,6 @@ func TestGrpcCodeFor_Cases(t *testing.T) {
 		{"invalid", invalid, codes.InvalidArgument},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			if got := grpcCodeFor(tc.err); got != tc.want {
 				t.Fatalf("grpcCodeFor(%v) = %s, want %s", tc.err, got, tc.want)

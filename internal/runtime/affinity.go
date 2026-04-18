@@ -29,7 +29,7 @@ import (
 //
 // The returned value is always non-nil and is freshly allocated so callers may
 // embed it without aliasing concerns.
-func requiredRuntimeNodeAffinity(label, value string) *corev1.NodeAffinity {
+func requiredRuntimeNodeAffinity(label string) *corev1.NodeAffinity {
 	return &corev1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{
@@ -38,7 +38,7 @@ func requiredRuntimeNodeAffinity(label, value string) *corev1.NodeAffinity {
 						{
 							Key:      label,
 							Operator: corev1.NodeSelectorOpIn,
-							Values:   []string{value},
+							Values:   []string{"true"},
 						},
 						{
 							Key:      "kubernetes.io/os",

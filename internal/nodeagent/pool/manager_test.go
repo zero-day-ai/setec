@@ -134,7 +134,6 @@ func (c *countingPrefetcher) Prefetch(_ context.Context, _ []string) error {
 // directory so releaseEntry's filesystem cleanup is exercised end to
 // end.
 type fakeLauncher struct {
-	t       *testing.T
 	factory FirecrackerFactory
 	err     error
 	mu      sync.Mutex
@@ -170,15 +169,15 @@ func (l *fakeLauncher) Launch(ctx context.Context, opts LaunchOptions) error {
 }
 
 // newTestManager assembles a Manager wired to the provided fakes.
-func newTestManager(storage storage.StorageBackend, pre *countingPrefetcher, fc *fakeFirecracker, concurrentBoots int) *Manager {
-	return newTestManagerWithFactory(storage, pre, func(_ string) firecracker.Client { return fc }, concurrentBoots)
+func newTestManager(storageBackend storage.StorageBackend, pre *countingPrefetcher, fc *fakeFirecracker, concurrentBoots int) *Manager {
+	return newTestManagerWithFactory(storageBackend, pre, func(_ string) firecracker.Client { return fc }, concurrentBoots)
 }
 
 // newTestManagerWithFactory exposes the firecracker factory override so
 // tests that need to intercept per-VM clients (e.g. concurrency)
 // can supply their own.
-func newTestManagerWithFactory(storage storage.StorageBackend, pre *countingPrefetcher, ff FirecrackerFactory, concurrentBoots int) *Manager {
-	m := New(storage, pre, ff, "node-a")
+func newTestManagerWithFactory(storageBackend storage.StorageBackend, pre *countingPrefetcher, ff FirecrackerFactory, concurrentBoots int) *Manager {
+	m := New(storageBackend, pre, ff, "node-a")
 	if concurrentBoots > 0 {
 		m.MaxConcurrentBoots = concurrentBoots
 	}
@@ -196,13 +195,13 @@ func newTestManagerWithFactory(storage storage.StorageBackend, pre *countingPref
 // a per-process subdirectory that the tests clean up in TestMain.
 var testPoolRoot string
 
-func newClass(name, image string, size int32, ttl time.Duration) setecv1alpha1.SandboxClass {
+func newClass(image string, size int32, ttl time.Duration) setecv1alpha1.SandboxClass {
 	var ttlPtr *metav1.Duration
 	if ttl > 0 {
 		ttlPtr = &metav1.Duration{Duration: ttl}
 	}
 	return setecv1alpha1.SandboxClass{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: "std"},
 		Spec: setecv1alpha1.SandboxClassSpec{
 			VMM:             setecv1alpha1.VMMFirecracker,
 			PreWarmPoolSize: size,
@@ -219,7 +218,7 @@ func TestReconcile_BootsNEntries(t *testing.T) {
 	m := newTestManager(s, pre, fc, 4)
 	fakeL := m.Launcher.(*fakeLauncher)
 
-	cls := newClass("std", "ghcr.io/org/app:v1", 3, 0)
+	cls := newClass("ghcr.io/org/app:v1", 3, 0)
 	if err := m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -249,7 +248,7 @@ func TestReconcile_NoOpWhenAlreadyAtSize(t *testing.T) {
 	m := newTestManager(s, pre, fc, 4)
 	fakeL := m.Launcher.(*fakeLauncher)
 
-	cls := newClass("std", "ghcr.io/org/app:v1", 2, time.Hour)
+	cls := newClass("ghcr.io/org/app:v1", 2, time.Hour)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 	fakeL.mu.Lock()
 	calls1 := fakeL.calls
@@ -272,13 +271,14 @@ func TestReconcile_ScaleDownReleasesExcess(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 4)
 
-	cls := newClass("std", "ghcr.io/org/app:v1", 3, 0)
+	cls := newClass("ghcr.io/org/app:v1", 3, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 
 	// Capture the entry directories so we can assert they are removed
 	// by the scale-down.
-	var refs []string
-	for _, e := range m.QueryAvailable("std", "") {
+	avail := m.QueryAvailable("std", "")
+	refs := make([]string, 0, len(avail))
+	for _, e := range avail {
 		refs = append(refs, e.StorageRef)
 	}
 
@@ -308,7 +308,7 @@ func TestReconcile_ScaleUpIncrements(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 2)
 
-	cls := newClass("std", "ghcr.io/org/app:v1", 1, 0)
+	cls := newClass("ghcr.io/org/app:v1", 1, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 	cls.Spec.PreWarmPoolSize = 3
 	if err := m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls}); err != nil {
@@ -333,7 +333,7 @@ func TestReconcile_ConcurrencyBounded(t *testing.T) {
 	}
 	m := newTestManagerWithFactory(s, pre, factory, 2)
 
-	cls := newClass("std", "ghcr.io/org/app:v1", 8, 0)
+	cls := newClass("ghcr.io/org/app:v1", 8, 0)
 	if err := m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestReconcile_TTLRecycling(t *testing.T) {
 	now := time.Now()
 	m.SetClock(func() time.Time { return now })
 
-	cls := newClass("std", "ghcr.io/org/app:v1", 2, 10*time.Minute)
+	cls := newClass("ghcr.io/org/app:v1", 2, 10*time.Minute)
 	if err := m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -396,8 +396,9 @@ func TestReconcile_TTLRecycling(t *testing.T) {
 
 	// Capture the entry dirs before the TTL roll so we can assert they
 	// are gone after the recycle.
-	var preDirs []string
-	for _, e := range m.QueryAvailable("std", "") {
+	availPre := m.QueryAvailable("std", "")
+	preDirs := make([]string, 0, len(availPre))
+	for _, e := range availPre {
 		preDirs = append(preDirs, e.StorageRef)
 	}
 
@@ -428,7 +429,7 @@ func TestClaim_ReturnsEntryAndRemoves(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 4)
 
-	cls := newClass("std", "img:v1", 2, 0)
+	cls := newClass("img:v1", 2, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 
 	e, ok, err := m.Claim(context.Background(), "std", "img:v1")
@@ -464,7 +465,7 @@ func TestClaim_WrongImageMisses(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 4)
 
-	cls := newClass("std", "img:v1", 1, 0)
+	cls := newClass("img:v1", 1, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 
 	_, ok, _ := m.Claim(context.Background(), "std", "other:v2")
@@ -479,7 +480,7 @@ func TestRelease_DeletesStorage(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 4)
 
-	cls := newClass("std", "img:v1", 1, 0)
+	cls := newClass("img:v1", 1, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 	e, _, _ := m.Claim(context.Background(), "std", "img:v1")
 
@@ -512,7 +513,7 @@ func TestReconcile_DropsClassNotListed(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 4)
 
-	cls := newClass("std", "img:v1", 2, 0)
+	cls := newClass("img:v1", 2, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 	if m.CountClass("std") != 2 {
 		t.Fatalf("pre drop: %d", m.CountClass("std"))
@@ -532,7 +533,7 @@ func TestReconcile_RejectsPoolWithoutImage(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 4)
 
-	cls := newClass("std", "", 1, 0) // empty image but size>0
+	cls := newClass("", 1, 0) // empty image but size>0
 	err := m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 	if err == nil {
 		t.Fatalf("expected error on missing image")
@@ -545,7 +546,7 @@ func TestQueryAvailable_FiltersAndCopies(t *testing.T) {
 	fc := &fakeFirecracker{}
 	m := newTestManager(s, pre, fc, 4)
 
-	cls := newClass("std", "img:v1", 3, 0)
+	cls := newClass("img:v1", 3, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 
 	got := m.QueryAvailable("std", "")
@@ -572,7 +573,7 @@ func TestSize(t *testing.T) {
 	if m.Size() != 0 {
 		t.Fatalf("fresh Size = %d, want 0", m.Size())
 	}
-	cls := newClass("std", "img:v1", 2, 0)
+	cls := newClass("img:v1", 2, 0)
 	_ = m.ReconcilePools(context.Background(), []setecv1alpha1.SandboxClass{cls})
 	if m.Size() != 2 {
 		t.Fatalf("Size = %d, want 2", m.Size())

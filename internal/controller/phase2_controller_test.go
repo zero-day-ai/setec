@@ -82,7 +82,7 @@ func TestPhase2_SandboxWithClass(t *testing.T) {
 
 	pod := waitForPod(g, ns, sb.Name)
 	g.Expect(pod.Spec.RuntimeClassName).NotTo(BeNil())
-	g.Expect(*pod.Spec.RuntimeClassName).To(Equal(cls.Spec.RuntimeClassName))
+	g.Expect(*pod.Spec.RuntimeClassName).To(Equal(cls.Spec.RuntimeClassName)) //nolint:staticcheck // back-compat: RuntimeClassName retained until v2
 }
 
 // ---------------------------------------------------------------------------

@@ -196,7 +196,7 @@ func BuildWithOptions(sb *setecv1alpha1.Sandbox, runtimeClassName string, opts B
 	// Apply the RuntimeSelection LAST so the dispatcher's MutatePod sees the
 	// fully-assembled pod (per task-12 requirement: option applied last in pipeline).
 	if opts.RuntimeSelection != nil {
-		if err := applyRuntimeSelection(pod, opts.RuntimeSelection, sb); err != nil {
+		if err := applyRuntimeSelection(pod, opts.RuntimeSelection); err != nil {
 			return nil, fmt.Errorf("podspec: apply runtime selection: %w", err)
 		}
 	}
@@ -217,7 +217,7 @@ func BuildWithOptions(sb *setecv1alpha1.Sandbox, runtimeClassName string, opts B
 // were set; since the builder does not have access to the SandboxClass we
 // pass nil here — callers that need param propagation should invoke
 // sel.Dispatcher.MutatePod directly after BuildWithOptions.
-func applyRuntimeSelection(pod *corev1.Pod, sel *runtimepkg.Selection, sb *setecv1alpha1.Sandbox) error {
+func applyRuntimeSelection(pod *corev1.Pod, sel *runtimepkg.Selection) error {
 	// Merge NodeAffinity required terms.
 	dispatcherAffinity := sel.Dispatcher.NodeAffinity()
 	if dispatcherAffinity != nil &&

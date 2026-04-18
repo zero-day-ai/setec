@@ -49,12 +49,12 @@ func newExtraClient(socketPath string) *extraClient {
 	}
 }
 
-func (c *extraClient) do(ctx context.Context, method, path string, body any) error {
+func (c *extraClient) do(ctx context.Context, path string, body any) error {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+path, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -64,11 +64,11 @@ func (c *extraClient) do(ctx context.Context, method, path string, body any) err
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
 	return fmt.Errorf("%s %s: %d %s: %s",
-		method, path, resp.StatusCode, http.StatusText(resp.StatusCode), bytes.TrimSpace(msg))
+		http.MethodPut, path, resp.StatusCode, http.StatusText(resp.StatusCode), bytes.TrimSpace(msg))
 }

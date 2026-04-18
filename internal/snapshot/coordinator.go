@@ -221,8 +221,8 @@ func (c *Coordinator) CreateSnapshot(ctx context.Context, sb *setecv1alpha1.Sand
 	vmm := setecv1alpha1.VMMFirecracker
 	if sb.Spec.SandboxClassName != "" {
 		cls := &setecv1alpha1.SandboxClass{}
-		if gerr := c.Client.Get(ctx, types.NamespacedName{Name: sb.Spec.SandboxClassName}, cls); gerr == nil && cls.Spec.VMM != "" {
-			vmm = cls.Spec.VMM
+		if gerr := c.Client.Get(ctx, types.NamespacedName{Name: sb.Spec.SandboxClassName}, cls); gerr == nil && cls.Spec.VMM != "" { //nolint:staticcheck // back-compat: VMM retained until v2
+			vmm = cls.Spec.VMM //nolint:staticcheck // back-compat: VMM retained until v2
 		}
 	}
 	className := sb.Spec.SandboxClassName

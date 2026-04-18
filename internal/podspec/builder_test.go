@@ -35,6 +35,11 @@ import (
 // care about the exact value.
 const defaultRuntimeClass = "kata-fc"
 
+const (
+	testLongSandboxName = "long-sandbox-name-42"
+	testMutatedLabel    = "MUTATED"
+)
+
 // newSandbox builds a Sandbox with sensible required fields so individual
 // tests only set what they care about.
 func newSandbox(mutators ...func(*setecv1alpha1.Sandbox)) *setecv1alpha1.Sandbox {
@@ -63,211 +68,176 @@ func newSandbox(mutators ...func(*setecv1alpha1.Sandbox)) *setecv1alpha1.Sandbox
 	return sb
 }
 
-func TestBuild_Success(t *testing.T) {
+func buildOrFatal(t *testing.T, sb *setecv1alpha1.Sandbox, rc string) *corev1.Pod {
+	t.Helper()
+	pod, err := Build(sb, rc)
+	if err != nil {
+		t.Fatalf("Build() returned unexpected error: %v", err)
+	}
+	if pod == nil {
+		t.Fatalf("Build() returned nil Pod")
+	}
+	return pod
+}
+
+func TestBuild_Success_MinimalSandbox(t *testing.T) {
 	t.Parallel()
-
-	type tc struct {
-		name             string
-		sandbox          *setecv1alpha1.Sandbox
-		runtimeClassName string
-		// assert takes the produced Pod (already known non-nil) and runs
-		// case-specific assertions.
-		assert func(t *testing.T, pod *corev1.Pod)
+	pod := buildOrFatal(t, newSandbox(), defaultRuntimeClass)
+	if pod.Name != "demo-vm" {
+		t.Errorf("pod name = %q, want %q", pod.Name, "demo-vm")
 	}
-
-	cases := []tc{
-		{
-			name:             "minimal valid sandbox produces fully populated pod",
-			sandbox:          newSandbox(),
-			runtimeClassName: defaultRuntimeClass,
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				wantName := "demo-vm"
-				if pod.Name != wantName {
-					t.Errorf("pod name = %q, want %q", pod.Name, wantName)
-				}
-				if pod.Namespace != "default" {
-					t.Errorf("pod namespace = %q, want %q", pod.Namespace, "default")
-				}
-				if got := pod.Labels[SandboxLabelKey]; got != "demo" {
-					t.Errorf("label %s = %q, want %q", SandboxLabelKey, got, "demo")
-				}
-				if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
-					t.Errorf("restartPolicy = %q, want Never", pod.Spec.RestartPolicy)
-				}
-				if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != defaultRuntimeClass {
-					t.Errorf("runtimeClassName = %v, want %q", pod.Spec.RuntimeClassName, defaultRuntimeClass)
-				}
-				if len(pod.Spec.Containers) != 1 {
-					t.Fatalf("containers = %d, want 1", len(pod.Spec.Containers))
-				}
-				c := pod.Spec.Containers[0]
-				if c.Name != ContainerName {
-					t.Errorf("container name = %q, want %q", c.Name, ContainerName)
-				}
-				if c.Image != "docker.io/library/python:3.12-slim" {
-					t.Errorf("container image = %q", c.Image)
-				}
-				wantCmd := []string{"python", "-c", "print('hi')"}
-				if diff := cmp.Diff(wantCmd, c.Command); diff != "" {
-					t.Errorf("container command mismatch (-want +got):\n%s", diff)
-				}
-				if len(c.Env) != 0 {
-					t.Errorf("expected no env vars, got %d", len(c.Env))
-				}
-			},
-		},
-		{
-			name: "sandbox with full env list preserves order and values",
-			sandbox: newSandbox(func(sb *setecv1alpha1.Sandbox) {
-				sb.Spec.Env = []corev1.EnvVar{
-					{Name: "FOO", Value: "bar"},
-					{Name: "BAZ", Value: "qux"},
-					{Name: "EMPTY", Value: ""},
-				}
-			}),
-			runtimeClassName: defaultRuntimeClass,
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				want := []corev1.EnvVar{
-					{Name: "FOO", Value: "bar"},
-					{Name: "BAZ", Value: "qux"},
-					{Name: "EMPTY", Value: ""},
-				}
-				if diff := cmp.Diff(want, pod.Spec.Containers[0].Env); diff != "" {
-					t.Errorf("env mismatch (-want +got):\n%s", diff)
-				}
-			},
-		},
-		{
-			name: "sandbox with multi-arg command preserves argv",
-			sandbox: newSandbox(func(sb *setecv1alpha1.Sandbox) {
-				sb.Spec.Command = []string{"/usr/bin/env", "bash", "-lc", "echo hello && sleep 1"}
-			}),
-			runtimeClassName: defaultRuntimeClass,
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				want := []string{"/usr/bin/env", "bash", "-lc", "echo hello && sleep 1"}
-				if diff := cmp.Diff(want, pod.Spec.Containers[0].Command); diff != "" {
-					t.Errorf("command mismatch (-want +got):\n%s", diff)
-				}
-			},
-		},
-		{
-			name: "edge case: 1 vcpu and small memory map to identical requests and limits",
-			sandbox: newSandbox(func(sb *setecv1alpha1.Sandbox) {
-				sb.Spec.Resources.VCPU = 1
-				sb.Spec.Resources.Memory = resource.MustParse("128Mi")
-			}),
-			runtimeClassName: defaultRuntimeClass,
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				req := pod.Spec.Containers[0].Resources.Requests
-				lim := pod.Spec.Containers[0].Resources.Limits
-				if got := req[corev1.ResourceCPU]; got.Cmp(resource.MustParse("1")) != 0 {
-					t.Errorf("request cpu = %s, want 1", got.String())
-				}
-				if got := req[corev1.ResourceMemory]; got.Cmp(resource.MustParse("128Mi")) != 0 {
-					t.Errorf("request memory = %s, want 128Mi", got.String())
-				}
-				// requests and limits must be identical — Kata needs a
-				// fixed allocation.
-				if diff := cmp.Diff(req, lim); diff != "" {
-					t.Errorf("requests != limits (-req +lim):\n%s", diff)
-				}
-			},
-		},
-		{
-			name: "edge case: maximum 32 vcpu and large memory survive translation",
-			sandbox: newSandbox(func(sb *setecv1alpha1.Sandbox) {
-				sb.Spec.Resources.VCPU = 32
-				sb.Spec.Resources.Memory = resource.MustParse("128Gi")
-			}),
-			runtimeClassName: defaultRuntimeClass,
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				req := pod.Spec.Containers[0].Resources.Requests
-				if got := req[corev1.ResourceCPU]; got.Cmp(resource.MustParse("32")) != 0 {
-					t.Errorf("request cpu = %s, want 32", got.String())
-				}
-				if got := req[corev1.ResourceMemory]; got.Cmp(resource.MustParse("128Gi")) != 0 {
-					t.Errorf("request memory = %s, want 128Gi", got.String())
-				}
-			},
-		},
-		{
-			name:             "owner reference is set to the sandbox with controller and block-delete flags",
-			sandbox:          newSandbox(),
-			runtimeClassName: defaultRuntimeClass,
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				if len(pod.OwnerReferences) != 1 {
-					t.Fatalf("ownerReferences = %d, want 1", len(pod.OwnerReferences))
-				}
-				ref := pod.OwnerReferences[0]
-				want := metav1.OwnerReference{
-					APIVersion:         setecv1alpha1.GroupVersion.String(),
-					Kind:               "Sandbox",
-					Name:               "demo",
-					UID:                types.UID("11111111-2222-3333-4444-555555555555"),
-					Controller:         boolPtr(true),
-					BlockOwnerDeletion: boolPtr(true),
-				}
-				if diff := cmp.Diff(want, ref); diff != "" {
-					t.Errorf("owner reference mismatch (-want +got):\n%s", diff)
-				}
-			},
-		},
-		{
-			name:             "runtime class name passes through verbatim",
-			sandbox:          newSandbox(),
-			runtimeClassName: "kata-qemu-custom",
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				if pod.Spec.RuntimeClassName == nil {
-					t.Fatalf("runtimeClassName is nil")
-				}
-				if *pod.Spec.RuntimeClassName != "kata-qemu-custom" {
-					t.Errorf("runtimeClassName = %q, want %q",
-						*pod.Spec.RuntimeClassName, "kata-qemu-custom")
-				}
-			},
-		},
-		{
-			name: "pod name format is <sandbox-name>-vm and sandbox label matches",
-			sandbox: newSandbox(func(sb *setecv1alpha1.Sandbox) {
-				sb.Name = "long-sandbox-name-42"
-				sb.Namespace = "tenant-a"
-			}),
-			runtimeClassName: defaultRuntimeClass,
-			assert: func(t *testing.T, pod *corev1.Pod) {
-				if pod.Name != "long-sandbox-name-42-vm" {
-					t.Errorf("pod name = %q", pod.Name)
-				}
-				if pod.Namespace != "tenant-a" {
-					t.Errorf("pod namespace = %q", pod.Namespace)
-				}
-				if got := pod.Labels[SandboxLabelKey]; got != "long-sandbox-name-42" {
-					t.Errorf("label %s = %q", SandboxLabelKey, got)
-				}
-				if !strings.HasSuffix(pod.Name, PodNameSuffix) {
-					t.Errorf("pod name %q missing suffix %q", pod.Name, PodNameSuffix)
-				}
-				// Ensure the OwnerReference Name tracks the Sandbox name.
-				if pod.OwnerReferences[0].Name != "long-sandbox-name-42" {
-					t.Errorf("owner ref name = %q", pod.OwnerReferences[0].Name)
-				}
-			},
-		},
+	if pod.Namespace != "default" {
+		t.Errorf("pod namespace = %q, want default", pod.Namespace)
 	}
+	if got := pod.Labels[SandboxLabelKey]; got != "demo" {
+		t.Errorf("label %s = %q, want demo", SandboxLabelKey, got)
+	}
+	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("restartPolicy = %q, want Never", pod.Spec.RestartPolicy)
+	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != defaultRuntimeClass {
+		t.Errorf("runtimeClassName = %v, want %q", pod.Spec.RuntimeClassName, defaultRuntimeClass)
+	}
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("containers = %d, want 1", len(pod.Spec.Containers))
+	}
+	c := pod.Spec.Containers[0]
+	if c.Name != ContainerName {
+		t.Errorf("container name = %q, want %q", c.Name, ContainerName)
+	}
+	if c.Image != "docker.io/library/python:3.12-slim" {
+		t.Errorf("container image = %q", c.Image)
+	}
+	wantCmd := []string{"python", "-c", "print('hi')"}
+	if diff := cmp.Diff(wantCmd, c.Command); diff != "" {
+		t.Errorf("container command mismatch (-want +got):\n%s", diff)
+	}
+	if len(c.Env) != 0 {
+		t.Errorf("expected no env vars, got %d", len(c.Env))
+	}
+}
 
-	for _, c := range cases {
-		c := c
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
+func TestBuild_Success_EnvList(t *testing.T) {
+	t.Parallel()
+	sb := newSandbox(func(sb *setecv1alpha1.Sandbox) {
+		sb.Spec.Env = []corev1.EnvVar{
+			{Name: "FOO", Value: "bar"},
+			{Name: "BAZ", Value: "qux"},
+			{Name: "EMPTY", Value: ""},
+		}
+	})
+	pod := buildOrFatal(t, sb, defaultRuntimeClass)
+	want := []corev1.EnvVar{
+		{Name: "FOO", Value: "bar"},
+		{Name: "BAZ", Value: "qux"},
+		{Name: "EMPTY", Value: ""},
+	}
+	if diff := cmp.Diff(want, pod.Spec.Containers[0].Env); diff != "" {
+		t.Errorf("env mismatch (-want +got):\n%s", diff)
+	}
+}
 
-			pod, err := Build(c.sandbox, c.runtimeClassName)
-			if err != nil {
-				t.Fatalf("Build() returned unexpected error: %v", err)
-			}
-			if pod == nil {
-				t.Fatalf("Build() returned nil Pod")
-			}
-			c.assert(t, pod)
-		})
+func TestBuild_Success_MultiArgCommand(t *testing.T) {
+	t.Parallel()
+	sb := newSandbox(func(sb *setecv1alpha1.Sandbox) {
+		sb.Spec.Command = []string{"/usr/bin/env", "bash", "-lc", "echo hello && sleep 1"}
+	})
+	pod := buildOrFatal(t, sb, defaultRuntimeClass)
+	want := []string{"/usr/bin/env", "bash", "-lc", "echo hello && sleep 1"}
+	if diff := cmp.Diff(want, pod.Spec.Containers[0].Command); diff != "" {
+		t.Errorf("command mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuild_Success_SmallResources(t *testing.T) {
+	t.Parallel()
+	sb := newSandbox(func(sb *setecv1alpha1.Sandbox) {
+		sb.Spec.Resources.VCPU = 1
+		sb.Spec.Resources.Memory = resource.MustParse("128Mi")
+	})
+	pod := buildOrFatal(t, sb, defaultRuntimeClass)
+	req := pod.Spec.Containers[0].Resources.Requests
+	lim := pod.Spec.Containers[0].Resources.Limits
+	if got := req[corev1.ResourceCPU]; got.Cmp(resource.MustParse("1")) != 0 {
+		t.Errorf("request cpu = %s, want 1", got.String())
+	}
+	if got := req[corev1.ResourceMemory]; got.Cmp(resource.MustParse("128Mi")) != 0 {
+		t.Errorf("request memory = %s, want 128Mi", got.String())
+	}
+	// requests and limits must be identical — Kata needs a fixed allocation.
+	if diff := cmp.Diff(req, lim); diff != "" {
+		t.Errorf("requests != limits (-req +lim):\n%s", diff)
+	}
+}
+
+func TestBuild_Success_LargeResources(t *testing.T) {
+	t.Parallel()
+	sb := newSandbox(func(sb *setecv1alpha1.Sandbox) {
+		sb.Spec.Resources.VCPU = 32
+		sb.Spec.Resources.Memory = resource.MustParse("128Gi")
+	})
+	pod := buildOrFatal(t, sb, defaultRuntimeClass)
+	req := pod.Spec.Containers[0].Resources.Requests
+	if got := req[corev1.ResourceCPU]; got.Cmp(resource.MustParse("32")) != 0 {
+		t.Errorf("request cpu = %s, want 32", got.String())
+	}
+	if got := req[corev1.ResourceMemory]; got.Cmp(resource.MustParse("128Gi")) != 0 {
+		t.Errorf("request memory = %s, want 128Gi", got.String())
+	}
+}
+
+func TestBuild_Success_OwnerReference(t *testing.T) {
+	t.Parallel()
+	pod := buildOrFatal(t, newSandbox(), defaultRuntimeClass)
+	if len(pod.OwnerReferences) != 1 {
+		t.Fatalf("ownerReferences = %d, want 1", len(pod.OwnerReferences))
+	}
+	ref := pod.OwnerReferences[0]
+	want := metav1.OwnerReference{
+		APIVersion:         setecv1alpha1.GroupVersion.String(),
+		Kind:               "Sandbox",
+		Name:               "demo",
+		UID:                types.UID("11111111-2222-3333-4444-555555555555"),
+		Controller:         boolPtr(true),
+		BlockOwnerDeletion: boolPtr(true),
+	}
+	if diff := cmp.Diff(want, ref); diff != "" {
+		t.Errorf("owner reference mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuild_Success_RuntimeClassName(t *testing.T) {
+	t.Parallel()
+	pod := buildOrFatal(t, newSandbox(), "kata-qemu-custom")
+	if pod.Spec.RuntimeClassName == nil {
+		t.Fatalf("runtimeClassName is nil")
+	}
+	if *pod.Spec.RuntimeClassName != "kata-qemu-custom" {
+		t.Errorf("runtimeClassName = %q, want kata-qemu-custom", *pod.Spec.RuntimeClassName)
+	}
+}
+
+func TestBuild_Success_PodNameAndLabels(t *testing.T) {
+	t.Parallel()
+	sb := newSandbox(func(sb *setecv1alpha1.Sandbox) {
+		sb.Name = testLongSandboxName
+		sb.Namespace = "tenant-a"
+	})
+	pod := buildOrFatal(t, sb, defaultRuntimeClass)
+	if pod.Name != testLongSandboxName+"-vm" {
+		t.Errorf("pod name = %q", pod.Name)
+	}
+	if pod.Namespace != "tenant-a" {
+		t.Errorf("pod namespace = %q", pod.Namespace)
+	}
+	if got := pod.Labels[SandboxLabelKey]; got != testLongSandboxName {
+		t.Errorf("label %s = %q", SandboxLabelKey, got)
+	}
+	if !strings.HasSuffix(pod.Name, PodNameSuffix) {
+		t.Errorf("pod name %q missing suffix %q", pod.Name, PodNameSuffix)
+	}
+	if pod.OwnerReferences[0].Name != testLongSandboxName {
+		t.Errorf("owner ref name = %q", pod.OwnerReferences[0].Name)
 	}
 }
 
@@ -343,7 +313,6 @@ func TestBuild_ValidationErrors(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -380,13 +349,13 @@ func TestBuild_DeepCopyIsolation(t *testing.T) {
 
 	// Mutate the Sandbox slices after Build and assert the Pod is
 	// unaffected.
-	sb.Spec.Command[0] = "MUTATED"
-	sb.Spec.Env[0].Value = "MUTATED"
+	sb.Spec.Command[0] = testMutatedLabel
+	sb.Spec.Env[0].Value = testMutatedLabel
 
-	if pod.Spec.Containers[0].Command[0] == "MUTATED" {
+	if pod.Spec.Containers[0].Command[0] == testMutatedLabel {
 		t.Errorf("pod command aliased Sandbox command slice")
 	}
-	if pod.Spec.Containers[0].Env[0].Value == "MUTATED" {
+	if pod.Spec.Containers[0].Env[0].Value == testMutatedLabel {
 		t.Errorf("pod env aliased Sandbox env slice")
 	}
 }
@@ -536,7 +505,7 @@ func TestWithRuntimeSelection_AffinityMerge_PreservesExisting(t *testing.T) {
 		Backend:    runtimepkg.BackendKataFC,
 		Dispatcher: kataDispatcher,
 	}
-	if err := applyRuntimeSelection(pod, kataSel, sb); err != nil {
+	if err := applyRuntimeSelection(pod, kataSel); err != nil {
 		t.Fatalf("second applyRuntimeSelection: %v", err)
 	}
 

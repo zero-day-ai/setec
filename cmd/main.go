@@ -161,7 +161,8 @@ func main() {
 
 	// Phase 3 flags.
 	pflag.BoolVar(&snapshotsEnabled, "snapshots-enabled", false,
-		"Phase 3 kill-switch: register the Snapshot CRD controller and wire snapshot.Coordinator for the Sandbox reconciler. Default false preserves Phase 2 behaviour.")
+		"Phase 3 kill-switch: register the Snapshot CRD controller and wire snapshot.Coordinator"+
+			" for the Sandbox reconciler. Default false preserves Phase 2 behaviour.")
 	pflag.StringVar(&nodeAgentEndpoint, "nodeagent-endpoint-pattern",
 		"%s.setec-node-agent.setec-system.svc:50052",
 		"Phase 3: format string that renders a dial target from a node name. %s is substituted with Pod.Spec.NodeName.")
@@ -306,20 +307,24 @@ func main() {
 			os.Exit(1)
 		}
 		dialer.TLSConfig = tlsConfig
+		//nolint:staticcheck // GetEventRecorderFor: controller-runtime API change, follow-up
+		snapshotCoordRecorder := mgr.GetEventRecorderFor("snapshot-coordinator")
 		coordinator = &snapshot.Coordinator{
 			Client:            mgr.GetClient(),
 			Dialer:            dialer,
-			Recorder:          mgr.GetEventRecorderFor("snapshot-coordinator"),
+			Recorder:          snapshotCoordRecorder,
 			Metrics:           collectors,
 			Tracer:            tracer,
 			KataSocketPattern: kataSocketPattern,
 		}
 	}
 
+	//nolint:staticcheck // GetEventRecorderFor: controller-runtime API change, follow-up
+	sandboxRecorder := mgr.GetEventRecorderFor("sandbox-controller")
 	if err := (&controller.SandboxReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
-		Recorder:            mgr.GetEventRecorderFor("sandbox-controller"),
+		Recorder:            sandboxRecorder,
 		NodeSelectorLabel:   nodeSelectorLabel,
 		Runtimes:            runtimeRegistry,
 		RuntimeCfg:          runtimeCfg,
@@ -336,10 +341,12 @@ func main() {
 
 	// Phase 3: register the SnapshotReconciler when enabled.
 	if snapshotsEnabled {
+		//nolint:staticcheck // GetEventRecorderFor: controller-runtime API change, follow-up
+		snapshotCtrlRecorder := mgr.GetEventRecorderFor("snapshot-controller")
 		if err := (&controller.SnapshotReconciler{
 			Client:      mgr.GetClient(),
 			Scheme:      mgr.GetScheme(),
-			Recorder:    mgr.GetEventRecorderFor("snapshot-controller"),
+			Recorder:    snapshotCtrlRecorder,
 			Coordinator: coordinator,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to set up SnapshotReconciler")

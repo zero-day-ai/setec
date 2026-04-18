@@ -86,9 +86,9 @@ func newRSReconciler(
 }
 
 // newSandboxForRS builds a minimal Sandbox with the given class name.
-func newSandboxForRS(name, ns, className string) *setecv1alpha1.Sandbox {
+func newSandboxForRS(className string) *setecv1alpha1.Sandbox {
 	return &setecv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
 		Spec: setecv1alpha1.SandboxSpec{
 			Image:            "img:v1",
 			Command:          []string{"sh"},
@@ -151,7 +151,7 @@ func TestSelectRuntime_Legacy(t *testing.T) {
 	g := NewWithT(t)
 
 	cls := newSandboxClassForRS("legacy-class", "", nil)
-	sb := newSandboxForRS("sb", "default", cls.Name)
+	sb := newSandboxForRS(cls.Name)
 	r, _ := newRSReconciler(t, nil, nil, cls, sb)
 
 	sel, err := r.selectRuntime(context.Background(), sb, cls)
@@ -176,7 +176,7 @@ func TestSelectRuntime_Legacy_WithClassRCName(t *testing.T) {
 			MaxResources:     &setecv1alpha1.Resources{VCPU: 2, Memory: resource.MustParse("1Gi")},
 		},
 	}
-	sb := newSandboxForRS("sb", "default", cls.Name)
+	sb := newSandboxForRS(cls.Name)
 	r, _ := newRSReconciler(t, nil, nil, cls, sb)
 
 	sel, err := r.selectRuntime(context.Background(), sb, cls)
@@ -214,7 +214,7 @@ func TestSelectRuntime_Fallback(t *testing.T) {
 	})
 
 	cls := newSandboxClassForRS("fallback-class", runtimepkg.BackendKataQEMU, []string{runtimepkg.BackendGVisor})
-	sb := newSandboxForRS("sb", "default", cls.Name)
+	sb := newSandboxForRS(cls.Name)
 
 	r, c := newRSReconciler(t, reg, cfg, cls, sb, gvisorNode)
 
@@ -263,7 +263,7 @@ func TestSelectRuntime_Exhaustion(t *testing.T) {
 	})
 
 	cls := newSandboxClassForRS("exhaust-class", runtimepkg.BackendRunc, nil)
-	sb := newSandboxForRS("sb", "default", cls.Name)
+	sb := newSandboxForRS(cls.Name)
 
 	r, c := newRSReconciler(t, reg, cfg, cls, sb, unrelatedNode)
 
@@ -307,7 +307,7 @@ func TestSelectRuntime_NilRuntimeDefaultsToConfig(t *testing.T) {
 
 	// cls has no Runtime field.
 	cls := newSandboxClassForRS("no-runtime-class", "", nil)
-	sb := newSandboxForRS("sb", "default", cls.Name)
+	sb := newSandboxForRS(cls.Name)
 
 	r, _ := newRSReconciler(t, reg, cfg, cls, sb, kataNode)
 

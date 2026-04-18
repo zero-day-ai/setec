@@ -19,6 +19,7 @@ package runtimeagent
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"testing"
 	"time"
 
@@ -32,7 +33,11 @@ import (
 	"github.com/zero-day-ai/setec/internal/runtimeagent/probe"
 )
 
-const testNodeName = "test-node-0"
+const (
+	testNodeName   = "test-node-0"
+	testLabelTrue  = "true"
+	testLabelFalse = "false"
+)
 
 // newScheme returns a Scheme with corev1 registered, which is all the fake
 // client needs for Node operations.
@@ -46,14 +51,12 @@ func newScheme(t *testing.T) *runtime.Scheme {
 }
 
 // newNode returns a bare Node with the given extra labels pre-populated.
-func newNode(name string, extraLabels map[string]string) *corev1.Node {
+func newNode(extraLabels map[string]string) *corev1.Node {
 	labels := make(map[string]string, len(extraLabels))
-	for k, v := range extraLabels {
-		labels[k] = v
-	}
+	maps.Copy(labels, extraLabels)
 	return &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
+			Name:   testNodeName,
 			Labels: labels,
 		},
 	}
@@ -71,19 +74,19 @@ func newFakeClient(t *testing.T, objs ...client.Object) client.Client {
 }
 
 // getNode fetches the named Node from the fake client.
-func getNode(t *testing.T, c client.Client, name string) *corev1.Node {
+func getNode(t *testing.T, c client.Client) *corev1.Node {
 	t.Helper()
 	n := &corev1.Node{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: name}, n); err != nil {
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testNodeName}, n); err != nil {
 		t.Fatalf("get Node: %v", err)
 	}
 	return n
 }
 
 // findCondition returns the first condition with the given type, or nil.
-func findCondition(conditions []corev1.NodeCondition, condType corev1.NodeConditionType) *corev1.NodeCondition {
+func findCondition(conditions []corev1.NodeCondition) *corev1.NodeCondition {
 	for i := range conditions {
-		if conditions[i].Type == condType {
+		if conditions[i].Type == conditionType {
 			return &conditions[i]
 		}
 	}
@@ -91,12 +94,12 @@ func findCondition(conditions []corev1.NodeCondition, condType corev1.NodeCondit
 }
 
 // allFourResults returns a canonical set of four CapabilityResults for testing.
-func allFourResults(kataFCAvail, kataQEMUAvail, gvisorAvail, runcAvail bool) []probe.CapabilityResult {
+func allFourResults(kataFCAvail, kataQEMUAvail, gvisorAvail bool) []probe.CapabilityResult {
 	return []probe.CapabilityResult{
 		{Backend: "kata-fc", Available: kataFCAvail},
 		{Backend: "kata-qemu", Available: kataQEMUAvail},
 		{Backend: "gvisor", Available: gvisorAvail},
-		{Backend: "runc", Available: runcAvail},
+		{Backend: "runc", Available: true},
 	}
 }
 
@@ -105,14 +108,14 @@ func allFourResults(kataFCAvail, kataQEMUAvail, gvisorAvail, runcAvail bool) []p
 func TestApply_FirstApply(t *testing.T) {
 	t.Parallel()
 
-	c := newFakeClient(t, newNode(testNodeName, nil))
-	results := allFourResults(true, true, true, true)
+	c := newFakeClient(t, newNode(nil))
+	results := allFourResults(true, true, true)
 
 	if err := Apply(context.Background(), c, testNodeName, results); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	node := getNode(t, c, testNodeName)
+	node := getNode(t, c)
 
 	// All four backend labels must be present.
 	for _, r := range results {
@@ -122,9 +125,9 @@ func TestApply_FirstApply(t *testing.T) {
 			t.Errorf("label %q missing", key)
 			continue
 		}
-		want := "false"
+		want := testLabelFalse
 		if r.Available {
-			want = "true"
+			want = testLabelTrue
 		}
 		if val != want {
 			t.Errorf("label %q = %q, want %q", key, val, want)
@@ -132,7 +135,7 @@ func TestApply_FirstApply(t *testing.T) {
 	}
 
 	// SetecRuntimes condition must be present.
-	cond := findCondition(node.Status.Conditions, conditionType)
+	cond := findCondition(node.Status.Conditions)
 	if cond == nil {
 		t.Fatalf("SetecRuntimes condition not found on Node")
 	}
@@ -157,15 +160,15 @@ func TestApply_FirstApply(t *testing.T) {
 func TestApply_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	c := newFakeClient(t, newNode(testNodeName, nil))
-	results := allFourResults(true, true, false, true)
+	c := newFakeClient(t, newNode(nil))
+	results := allFourResults(true, true, false)
 
 	if err := Apply(context.Background(), c, testNodeName, results); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 
-	node := getNode(t, c, testNodeName)
-	cond := findCondition(node.Status.Conditions, conditionType)
+	node := getNode(t, c)
+	cond := findCondition(node.Status.Conditions)
 	if cond == nil {
 		t.Fatalf("SetecRuntimes condition missing after first Apply")
 	}
@@ -179,8 +182,8 @@ func TestApply_Idempotent(t *testing.T) {
 		t.Fatalf("second Apply: %v", err)
 	}
 
-	node = getNode(t, c, testNodeName)
-	cond = findCondition(node.Status.Conditions, conditionType)
+	node = getNode(t, c)
+	cond = findCondition(node.Status.Conditions)
 	if cond == nil {
 		t.Fatalf("SetecRuntimes condition missing after second Apply")
 	}
@@ -197,21 +200,21 @@ func TestApply_Idempotent(t *testing.T) {
 func TestApply_Transition(t *testing.T) {
 	t.Parallel()
 
-	c := newFakeClient(t, newNode(testNodeName, nil))
+	c := newFakeClient(t, newNode(nil))
 
 	// First apply: gvisor unavailable.
-	results := allFourResults(true, true, false, true)
+	results := allFourResults(true, true, false)
 	if err := Apply(context.Background(), c, testNodeName, results); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	node := getNode(t, c, testNodeName)
-	firstCond := findCondition(node.Status.Conditions, conditionType)
+	node := getNode(t, c)
+	firstCond := findCondition(node.Status.Conditions)
 	if firstCond == nil {
 		t.Fatalf("condition missing after first Apply")
 	}
 	firstTransition := firstCond.LastTransitionTime.Time
 
-	if node.Labels[labelPrefix+"gvisor"] != "false" {
+	if node.Labels[labelPrefix+"gvisor"] != testLabelFalse {
 		t.Errorf("gvisor label should be false initially, got %q", node.Labels[labelPrefix+"gvisor"])
 	}
 
@@ -220,23 +223,23 @@ func TestApply_Transition(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// Second apply: gvisor now available → status flips True→False→True path.
-	results2 := allFourResults(true, true, true, true)
+	results2 := allFourResults(true, true, true)
 	if err := Apply(context.Background(), c, testNodeName, results2); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 
-	node = getNode(t, c, testNodeName)
-	secondCond := findCondition(node.Status.Conditions, conditionType)
+	node = getNode(t, c)
+	secondCond := findCondition(node.Status.Conditions)
 	if secondCond == nil {
 		t.Fatalf("condition missing after second Apply")
 	}
 
-	if node.Labels[labelPrefix+"gvisor"] != "true" {
+	if node.Labels[labelPrefix+"gvisor"] != testLabelTrue {
 		t.Errorf("gvisor label should be true after transition, got %q", node.Labels[labelPrefix+"gvisor"])
 	}
 
 	// The overall condition status changed (False→True), so transition time must advance.
-	if !secondCond.LastTransitionTime.Time.After(firstTransition) {
+	if !secondCond.LastTransitionTime.After(firstTransition) {
 		t.Errorf("LastTransitionTime did not advance on status flip: first=%v second=%v",
 			firstTransition, secondCond.LastTransitionTime.Time)
 	}
@@ -248,17 +251,17 @@ func TestApply_PreservesUnrelatedLabels(t *testing.T) {
 	t.Parallel()
 
 	extraLabels := map[string]string{
-		"example.com/foo": "bar",
+		"example.com/foo":        "bar",
 		"kubernetes.io/hostname": "test-node-0",
 	}
-	c := newFakeClient(t, newNode(testNodeName, extraLabels))
-	results := allFourResults(false, false, false, true)
+	c := newFakeClient(t, newNode(extraLabels))
+	results := allFourResults(false, false, false)
 
 	if err := Apply(context.Background(), c, testNodeName, results); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	node := getNode(t, c, testNodeName)
+	node := getNode(t, c)
 
 	for k, want := range extraLabels {
 		if got, ok := node.Labels[k]; !ok || got != want {

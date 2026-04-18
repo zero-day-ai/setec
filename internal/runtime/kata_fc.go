@@ -51,7 +51,7 @@ func (d *KataFCDispatcher) RuntimeClassName() string { return d.cfg.RuntimeClass
 // NodeAffinity implements Dispatcher.  It requires the node label
 // setec.zero-day.ai/runtime.kata-fc=true and kubernetes.io/os=linux.
 func (d *KataFCDispatcher) NodeAffinity() *corev1.NodeAffinity {
-	return requiredRuntimeNodeAffinity(runtimeAffinityLabel(BackendKataFC), "true")
+	return requiredRuntimeNodeAffinity(runtimeAffinityLabel(BackendKataFC))
 }
 
 // Overhead implements Dispatcher.  Returns BackendConfig.DefaultOverhead when

@@ -154,7 +154,6 @@ func TestSandboxClassWebhook_Default(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w := webhookWith(fakeClientWithNS(t), cfg)
@@ -263,8 +262,8 @@ func TestSandboxClassWebhook_ValidateCreate(t *testing.T) {
 				c.Runtimes[setecruntime.BackendRunc] = setecruntime.BackendConfig{Enabled: true, DevOnly: true}
 				return c
 			}(),
-			nsObjs:  []client.Object{gateNamespaceLabelled(allowLabel)},
-			class:   mkSandboxClass("runc", "", mkRuntime(setecruntime.BackendRunc)),
+			nsObjs: []client.Object{gateNamespaceLabelled(allowLabel)},
+			class:  mkSandboxClass("runc", "", mkRuntime(setecruntime.BackendRunc)),
 		},
 		{
 			name: "backend=runc, devOnly=true, gate namespace NOT labelled → reject",
@@ -297,7 +296,6 @@ func TestSandboxClassWebhook_ValidateCreate(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := fakeClientWithNS(t, tc.nsObjs...)

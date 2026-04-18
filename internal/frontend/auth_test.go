@@ -34,7 +34,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func makeCert(t *testing.T, cn string, dns []string) *x509.Certificate {
+func makeCert(t *testing.T, dns []string) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -42,7 +42,7 @@ func makeCert(t *testing.T, cn string, dns []string) *x509.Certificate {
 	}
 	tpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: cn},
+		Subject:      pkix.Name{},
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(time.Hour),
 		DNSNames:     dns,
@@ -97,7 +97,7 @@ func TestTenantFromContext_NoPeerCert(t *testing.T) {
 
 func TestTenantFromContext_HappyPath(t *testing.T) {
 	t.Parallel()
-	cert := makeCert(t, "", []string{"tenant-a.svc"})
+	cert := makeCert(t, []string{"tenant-a.svc"})
 	tid, err := TenantFromContext(ctxWithCert(cert))
 	if err != nil {
 		t.Fatalf("TenantFromContext: %v", err)
@@ -109,7 +109,7 @@ func TestTenantFromContext_HappyPath(t *testing.T) {
 
 func TestTenantFromContext_NoIdentityInCert(t *testing.T) {
 	t.Parallel()
-	cert := makeCert(t, "", nil)
+	cert := makeCert(t, nil)
 	_, err := TenantFromContext(ctxWithCert(cert))
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("code = %s, want PermissionDenied", status.Code(err))

@@ -63,14 +63,14 @@ func (s *stubNamespaceGetter) GetNamespaceLabels(_ context.Context, name string)
 
 // mkClass builds a SandboxClass with the given name, max resources, and
 // allowed modes. Helpers keep table cases focused on inputs.
-func mkClass(name string, isDefault bool, maxVCPU int32, maxMem string, modes ...setecv1alpha1.NetworkMode) *setecv1alpha1.SandboxClass {
+func mkClass(name string, isDefault bool, maxMem string, modes ...setecv1alpha1.NetworkMode) *setecv1alpha1.SandboxClass {
 	return &setecv1alpha1.SandboxClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: setecv1alpha1.SandboxClassSpec{
-			VMM:     setecv1alpha1.VMMFirecracker,
+			VMM:     setecv1alpha1.VMMFirecracker, //nolint:staticcheck // back-compat: VMM retained until v2
 			Default: isDefault,
 			MaxResources: &setecv1alpha1.Resources{
-				VCPU:   maxVCPU,
+				VCPU:   4,
 				Memory: resource.MustParse(maxMem),
 			},
 			AllowedNetworkModes: modes,
@@ -79,13 +79,13 @@ func mkClass(name string, isDefault bool, maxVCPU int32, maxMem string, modes ..
 }
 
 // mkSandbox constructs a Sandbox with knobs for the fields tests vary.
-func mkSandbox(className, namespace string, vcpu int32, mem string, mode setecv1alpha1.NetworkMode) *setecv1alpha1.Sandbox {
+func mkSandbox(className string, vcpu int32, mem string, mode setecv1alpha1.NetworkMode) *setecv1alpha1.Sandbox {
 	var netSpec *setecv1alpha1.Network
 	if mode != "" {
 		netSpec = &setecv1alpha1.Network{Mode: mode}
 	}
 	return &setecv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "team-a"},
 		Spec: setecv1alpha1.SandboxSpec{
 			SandboxClassName: className,
 			Image:            "alpine:3.19",
@@ -115,42 +115,42 @@ func TestValidateCreate(t *testing.T) {
 		{
 			name: "valid sandbox within class constraints",
 			seed: []client.Object{
-				mkClass("standard", false, 4, "8Gi",
+				mkClass("standard", false, "8Gi",
 					setecv1alpha1.NetworkModeNone, setecv1alpha1.NetworkModeEgressAllowList),
 			},
-			sb: mkSandbox("standard", "team-a", 2, "2Gi", setecv1alpha1.NetworkModeNone),
+			sb: mkSandbox("standard", 2, "2Gi", setecv1alpha1.NetworkModeNone),
 		},
 		{
 			name: "vcpu exceeds class max",
 			seed: []client.Object{
-				mkClass("standard", false, 4, "8Gi"),
+				mkClass("standard", false, "8Gi"),
 			},
-			sb:      mkSandbox("standard", "team-a", 8, "2Gi", ""),
+			sb:      mkSandbox("standard", 8, "2Gi", ""),
 			wantErr: true,
 			wantMsg: "vcpu",
 		},
 		{
 			name: "memory exceeds class max",
 			seed: []client.Object{
-				mkClass("standard", false, 4, "8Gi"),
+				mkClass("standard", false, "8Gi"),
 			},
-			sb:      mkSandbox("standard", "team-a", 2, "16Gi", ""),
+			sb:      mkSandbox("standard", 2, "16Gi", ""),
 			wantErr: true,
 			wantMsg: "memory",
 		},
 		{
 			name: "referenced class not found",
 			seed: []client.Object{
-				mkClass("standard", false, 4, "8Gi"),
+				mkClass("standard", false, "8Gi"),
 			},
-			sb:      mkSandbox("missing", "team-a", 1, "512Mi", ""),
+			sb:      mkSandbox("missing", 1, "512Mi", ""),
 			wantErr: true,
 			wantMsg: "not found",
 		},
 		{
 			name:    "no class name, no default in cluster (multitenant on)",
 			seed:    nil,
-			sb:      mkSandbox("", "team-a", 1, "512Mi", ""),
+			sb:      mkSandbox("", 1, "512Mi", ""),
 			wantErr: true,
 			// Multi-tenancy off → no-default is acceptable (Phase 1 compat).
 			// Flip multitenant to require a class.
@@ -164,26 +164,26 @@ func TestValidateCreate(t *testing.T) {
 		{
 			name: "no class name, no default (Phase 1 back-compat)",
 			seed: nil,
-			sb:   mkSandbox("", "team-a", 1, "512Mi", ""),
+			sb:   mkSandbox("", 1, "512Mi", ""),
 			// multitenant off, no default — the webhook admits and
 			// the reconciler handles back-compat.
 		},
 		{
 			name: "network mode not in allowed list",
 			seed: []client.Object{
-				mkClass("standard", false, 4, "8Gi",
+				mkClass("standard", false, "8Gi",
 					setecv1alpha1.NetworkModeNone),
 			},
-			sb:      mkSandbox("standard", "team-a", 2, "2Gi", setecv1alpha1.NetworkModeFull),
+			sb:      mkSandbox("standard", 2, "2Gi", setecv1alpha1.NetworkModeFull),
 			wantErr: true,
 			wantMsg: "network.mode",
 		},
 		{
 			name: "multi-tenancy enabled: namespace missing tenant label",
 			seed: []client.Object{
-				mkClass("standard", false, 4, "8Gi"),
+				mkClass("standard", false, "8Gi"),
 			},
-			sb:          mkSandbox("standard", "team-a", 2, "2Gi", ""),
+			sb:          mkSandbox("standard", 2, "2Gi", ""),
 			multitenant: true,
 			labelKey:    "setec.zero-day.ai/tenant",
 			nsGetter: &stubNamespaceGetter{
@@ -197,9 +197,9 @@ func TestValidateCreate(t *testing.T) {
 		{
 			name: "multi-tenancy enabled: namespace has valid tenant label",
 			seed: []client.Object{
-				mkClass("standard", false, 4, "8Gi"),
+				mkClass("standard", false, "8Gi"),
 			},
-			sb:          mkSandbox("standard", "team-a", 2, "2Gi", ""),
+			sb:          mkSandbox("standard", 2, "2Gi", ""),
 			multitenant: true,
 			labelKey:    "setec.zero-day.ai/tenant",
 			nsGetter: &stubNamespaceGetter{
@@ -211,17 +211,16 @@ func TestValidateCreate(t *testing.T) {
 		{
 			name: "ambiguous default: two classes marked default",
 			seed: []client.Object{
-				mkClass("a", true, 4, "8Gi"),
-				mkClass("b", true, 4, "8Gi"),
+				mkClass("a", true, "8Gi"),
+				mkClass("b", true, "8Gi"),
 			},
-			sb:      mkSandbox("", "team-a", 2, "2Gi", ""),
+			sb:      mkSandbox("", 2, "2Gi", ""),
 			wantErr: true,
 			wantMsg: "ambiguity",
 		},
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := newFakeClient(t, tc.seed...)
@@ -251,12 +250,12 @@ func TestValidateCreate(t *testing.T) {
 func TestValidateUpdate(t *testing.T) {
 	t.Parallel()
 
-	seed := []client.Object{mkClass("standard", false, 4, "8Gi")}
+	seed := []client.Object{mkClass("standard", false, "8Gi")}
 	c := newFakeClient(t, seed...)
 	v := &SandboxValidator{Resolver: class.NewResolver(c)}
 
-	oldSB := mkSandbox("standard", "team-a", 2, "2Gi", "")
-	newSB := mkSandbox("standard", "team-a", 8, "2Gi", "")
+	oldSB := mkSandbox("standard", 2, "2Gi", "")
+	newSB := mkSandbox("standard", 8, "2Gi", "")
 
 	_, err := v.ValidateUpdate(context.Background(), oldSB, newSB)
 	if err == nil {
@@ -267,7 +266,7 @@ func TestValidateUpdate(t *testing.T) {
 func TestValidateDelete(t *testing.T) {
 	t.Parallel()
 	v := &SandboxValidator{Resolver: class.NewResolver(newFakeClient(t))}
-	warnings, err := v.ValidateDelete(context.Background(), mkSandbox("", "team-a", 1, "1Gi", ""))
+	warnings, err := v.ValidateDelete(context.Background(), mkSandbox("", 1, "1Gi", ""))
 	if err != nil {
 		t.Fatalf("ValidateDelete() err = %v, want nil", err)
 	}
@@ -278,19 +277,19 @@ func TestValidateDelete(t *testing.T) {
 
 // mkSandboxWithSnapshotRef returns a Sandbox that references a Snapshot
 // via spec.snapshotRef.name. Used by the Phase 3 admission tests.
-func mkSandboxWithSnapshotRef(class, ns, refName, image string) *setecv1alpha1.Sandbox {
-	sb := mkSandbox(class, ns, 2, "2Gi", "")
-	sb.Spec.Image = image
+func mkSandboxWithSnapshotRef(refName string) *setecv1alpha1.Sandbox {
+	sb := mkSandbox("standard", 2, "2Gi", "")
+	sb.Spec.Image = "img:v1"
 	sb.Spec.SnapshotRef = &setecv1alpha1.SandboxSnapshotRef{Name: refName}
 	return sb
 }
 
 // mkSnapshot returns a ready Snapshot CR for admission tests.
-func mkSnapshot(ns, name, class, image string, vmm setecv1alpha1.VMM) *setecv1alpha1.Snapshot {
+func mkSnapshot(ns, name, classObj, image string, vmm setecv1alpha1.VMM) *setecv1alpha1.Snapshot {
 	return &setecv1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 		Spec: setecv1alpha1.SnapshotSpec{
-			SandboxClass: class, ImageRef: image, VMM: vmm,
+			SandboxClass: classObj, ImageRef: image, VMM: vmm,
 			StorageBackend: "local-disk", StorageRef: name,
 			Node: "node-a",
 		},
@@ -302,10 +301,10 @@ func TestValidateCreate_Phase3_SnapshotRef(t *testing.T) {
 
 	t.Run("missing snapshot rejected", func(t *testing.T) {
 		t.Parallel()
-		seed := []client.Object{mkClass("standard", false, 4, "8Gi")}
+		seed := []client.Object{mkClass("standard", false, "8Gi")}
 		c := newFakeClient(t, seed...)
 		v := &SandboxValidator{Resolver: class.NewResolver(c), Client: c}
-		sb := mkSandboxWithSnapshotRef("standard", "team-a", "ghost", "img:v1")
+		sb := mkSandboxWithSnapshotRef("ghost")
 		_, err := v.ValidateCreate(context.Background(), sb)
 		if err == nil || !strings.Contains(err.Error(), "not found") {
 			t.Fatalf("expected not-found error, got %v", err)
@@ -314,11 +313,11 @@ func TestValidateCreate_Phase3_SnapshotRef(t *testing.T) {
 
 	t.Run("cross-namespace rejected via Validator", func(t *testing.T) {
 		t.Parallel()
-		cls := mkClass("standard", false, 4, "8Gi")
+		cls := mkClass("standard", false, "8Gi")
 		snap := mkSnapshot("team-b", "snap-1", "standard", "img:v1", setecv1alpha1.VMMFirecracker)
 		c := newFakeClient(t, cls, snap)
 		v := &SandboxValidator{Resolver: class.NewResolver(c), Client: c}
-		sb := mkSandboxWithSnapshotRef("standard", "team-a", "snap-1", "img:v1")
+		sb := mkSandboxWithSnapshotRef("snap-1")
 		_, err := v.ValidateCreate(context.Background(), sb)
 		// When the Snapshot is in a different namespace, Get returns
 		// NotFound (fake client is namespaced). That's effectively
@@ -330,11 +329,11 @@ func TestValidateCreate_Phase3_SnapshotRef(t *testing.T) {
 
 	t.Run("incompatible class rejected", func(t *testing.T) {
 		t.Parallel()
-		cls := mkClass("standard", false, 4, "8Gi")
+		cls := mkClass("standard", false, "8Gi")
 		snap := mkSnapshot("team-a", "snap-1", "fast", "img:v1", setecv1alpha1.VMMFirecracker)
 		c := newFakeClient(t, cls, snap)
 		v := &SandboxValidator{Resolver: class.NewResolver(c), Client: c}
-		sb := mkSandboxWithSnapshotRef("standard", "team-a", "snap-1", "img:v1")
+		sb := mkSandboxWithSnapshotRef("snap-1")
 		_, err := v.ValidateCreate(context.Background(), sb)
 		if err == nil || !strings.Contains(err.Error(), "SandboxClass") {
 			t.Fatalf("expected class-mismatch error, got %v", err)
@@ -343,11 +342,11 @@ func TestValidateCreate_Phase3_SnapshotRef(t *testing.T) {
 
 	t.Run("compatible snapshot accepted", func(t *testing.T) {
 		t.Parallel()
-		cls := mkClass("standard", false, 4, "8Gi")
+		cls := mkClass("standard", false, "8Gi")
 		snap := mkSnapshot("team-a", "snap-1", "standard", "img:v1", setecv1alpha1.VMMFirecracker)
 		c := newFakeClient(t, cls, snap)
 		v := &SandboxValidator{Resolver: class.NewResolver(c), Client: c}
-		sb := mkSandboxWithSnapshotRef("standard", "team-a", "snap-1", "img:v1")
+		sb := mkSandboxWithSnapshotRef("snap-1")
 		_, err := v.ValidateCreate(context.Background(), sb)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -358,7 +357,7 @@ func TestValidateCreate_Phase3_SnapshotRef(t *testing.T) {
 func TestValidateCreate_NamespaceGetterError(t *testing.T) {
 	t.Parallel()
 
-	seed := []client.Object{mkClass("standard", false, 4, "8Gi")}
+	seed := []client.Object{mkClass("standard", false, "8Gi")}
 	c := newFakeClient(t, seed...)
 	v := &SandboxValidator{
 		Resolver:            class.NewResolver(c),
@@ -368,7 +367,7 @@ func TestValidateCreate_NamespaceGetterError(t *testing.T) {
 			err: errors.New("api server unavailable"),
 		},
 	}
-	sb := mkSandbox("standard", "team-a", 2, "2Gi", "")
+	sb := mkSandbox("standard", 2, "2Gi", "")
 	_, err := v.ValidateCreate(context.Background(), sb)
 	if err == nil {
 		t.Fatalf("expected error from namespace getter")
@@ -383,12 +382,12 @@ func TestValidateCreate_NamespaceGetterError(t *testing.T) {
 // must not silently allow every Sandbox through.
 func TestValidateCreate_FailClosedWhenMultitenancyUnwired(t *testing.T) {
 	v := &SandboxValidator{
-		Resolver:            class.NewResolver(newFakeClient(t, mkClass("standard", true, 4, "4Gi"))),
+		Resolver:            class.NewResolver(newFakeClient(t, mkClass("standard", true, "4Gi"))),
 		MultiTenancyEnabled: true,
 		TenantLabelKey:      "setec.zero-day.ai/tenant",
 		// NamespaceGetter deliberately unset.
 	}
-	sb := mkSandbox("standard", "team-a", 1, "1Gi", "")
+	sb := mkSandbox("standard", 1, "1Gi", "")
 	_, err := v.ValidateCreate(context.Background(), sb)
 	if err == nil {
 		t.Fatal("expected fail-closed error, got nil")

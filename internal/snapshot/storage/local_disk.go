@@ -284,15 +284,12 @@ func overwriteWithZeros(path string, size int64) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	buf := make([]byte, 64*1024)
 	var written int64
 	for written < size {
-		chunk := int64(len(buf))
-		if size-written < chunk {
-			chunk = size - written
-		}
+		chunk := min(size-written, int64(len(buf)))
 		n, werr := f.Write(buf[:chunk])
 		if werr != nil {
 			return werr

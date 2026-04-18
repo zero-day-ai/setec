@@ -129,13 +129,13 @@ func (s *Service) resolveNamespace(ctx context.Context) (string, error) {
 
 // parseSandboxID splits a sandbox_id of the form <namespace>/<name>/<uid>
 // into its components. Returns InvalidArgument if the id shape is wrong.
-func parseSandboxID(id string) (ns, name, uid string, err error) {
+func parseSandboxID(id string) (ns, name string, err error) {
 	parts := strings.Split(id, "/")
 	if len(parts) != 3 {
-		return "", "", "", status.Errorf(codes.InvalidArgument,
+		return "", "", status.Errorf(codes.InvalidArgument,
 			"sandbox_id %q must be <namespace>/<name>/<uid>", id)
 	}
-	return parts[0], parts[1], parts[2], nil
+	return parts[0], parts[1], nil
 }
 
 // Launch translates LaunchRequest into a Sandbox CR create.
@@ -217,7 +217,7 @@ func (s *Service) Launch(ctx context.Context, req *setecv1alpha1grpc.LaunchReque
 // Wait polls the Sandbox until it reaches a terminal phase and returns.
 // The caller's context controls the timeout; no server-side deadline.
 func (s *Service) Wait(ctx context.Context, req *setecv1alpha1grpc.WaitRequest) (*setecv1alpha1grpc.WaitResponse, error) {
-	ns, name, _, err := parseSandboxID(req.GetSandboxId())
+	ns, name, err := parseSandboxID(req.GetSandboxId())
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ func (s *Service) Wait(ctx context.Context, req *setecv1alpha1grpc.WaitRequest) 
 // Kill deletes the Sandbox CR. Owner-reference GC collects the Pod and
 // any NetworkPolicy.
 func (s *Service) Kill(ctx context.Context, req *setecv1alpha1grpc.KillRequest) (*setecv1alpha1grpc.KillResponse, error) {
-	ns, name, _, err := parseSandboxID(req.GetSandboxId())
+	ns, name, err := parseSandboxID(req.GetSandboxId())
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +284,7 @@ func (s *Service) Kill(ctx context.Context, req *setecv1alpha1grpc.KillRequest) 
 func (s *Service) StreamLogs(req *setecv1alpha1grpc.StreamLogsRequest, stream setecv1alpha1grpc.SandboxService_StreamLogsServer) error {
 	ctx := stream.Context()
 
-	ns, name, _, err := parseSandboxID(req.GetSandboxId())
+	ns, name, err := parseSandboxID(req.GetSandboxId())
 	if err != nil {
 		return err
 	}

@@ -42,9 +42,9 @@ func TestValidate(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		cfg        *RuntimeConfig
-		wantErr    bool
+		name        string
+		cfg         *RuntimeConfig
+		wantErr     bool
 		errContains string
 	}{
 		{
@@ -99,8 +99,8 @@ func TestValidate(t *testing.T) {
 			name: "fallback entry disabled",
 			cfg: &RuntimeConfig{
 				Runtimes: map[string]BackendConfig{
-					BackendKataFC:  {Enabled: true, RuntimeClassName: "kata-fc"},
-					BackendGVisor:  {Enabled: false},
+					BackendKataFC: {Enabled: true, RuntimeClassName: "kata-fc"},
+					BackendGVisor: {Enabled: false},
 				},
 				Defaults: DefaultsConfig{
 					Runtime: RuntimeDefaults{
@@ -153,8 +153,8 @@ func TestValidate(t *testing.T) {
 			name: "valid config — multiple enabled backends with fallback",
 			cfg: &RuntimeConfig{
 				Runtimes: map[string]BackendConfig{
-					BackendKataFC:  {Enabled: true, RuntimeClassName: "kata-fc"},
-					BackendGVisor:  {Enabled: true, RuntimeClassName: "gvisor"},
+					BackendKataFC: {Enabled: true, RuntimeClassName: "kata-fc"},
+					BackendGVisor: {Enabled: true, RuntimeClassName: "gvisor"},
 				},
 				Defaults: DefaultsConfig{
 					Runtime: RuntimeDefaults{

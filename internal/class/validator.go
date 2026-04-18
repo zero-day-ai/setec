@@ -26,6 +26,7 @@ package class
 
 import (
 	"fmt"
+	"slices"
 
 	setecv1alpha1 "github.com/zero-day-ai/setec/api/v1alpha1"
 )
@@ -117,10 +118,5 @@ func Validate(sb *setecv1alpha1.Sandbox, cls *setecv1alpha1.SandboxClass) []Cons
 // containsNetworkMode is a tiny helper that avoids bringing in
 // golang.org/x/exp/slices for a one-line search.
 func containsNetworkMode(modes []setecv1alpha1.NetworkMode, want setecv1alpha1.NetworkMode) bool {
-	for _, m := range modes {
-		if m == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(modes, want)
 }

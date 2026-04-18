@@ -26,9 +26,9 @@ import (
 )
 
 // newSandbox is a small builder keeping test cases readable.
-func newSandbox(ns, name, image string) *setecv1alpha1.Sandbox {
+func newSandbox(image string) *setecv1alpha1.Sandbox {
 	return &setecv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "t-a", Name: "s"},
 		Spec: setecv1alpha1.SandboxSpec{
 			Image: image,
 		},
@@ -48,11 +48,11 @@ func newSnapshot(ns, name, class, image string, vmm setecv1alpha1.VMM) *setecv1a
 	}
 }
 
-func newClass(name string, vmm setecv1alpha1.VMM) *setecv1alpha1.SandboxClass {
+func newClass(name string) *setecv1alpha1.SandboxClass {
 	return &setecv1alpha1.SandboxClass{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: setecv1alpha1.SandboxClassSpec{
-			VMM: vmm,
+			VMM: setecv1alpha1.VMMFirecracker, //nolint:staticcheck // back-compat: VMM retained until v2
 		},
 	}
 }
@@ -67,37 +67,37 @@ func TestValidate(t *testing.T) {
 	}{
 		{
 			name:  "happy path: all fields match",
-			sb:    newSandbox("t-a", "s", "ghcr.io/org/app:v1"),
+			sb:    newSandbox("ghcr.io/org/app:v1"),
 			snap:  newSnapshot("t-a", "snap-1", "standard", "ghcr.io/org/app:v1", setecv1alpha1.VMMFirecracker),
-			class: newClass("standard", setecv1alpha1.VMMFirecracker),
+			class: newClass("standard"),
 			want:  nil,
 		},
 		{
 			name:  "sandbox image empty is accepted",
-			sb:    newSandbox("t-a", "s", ""),
+			sb:    newSandbox(""),
 			snap:  newSnapshot("t-a", "snap-1", "standard", "ghcr.io/org/app:v1", setecv1alpha1.VMMFirecracker),
-			class: newClass("standard", setecv1alpha1.VMMFirecracker),
+			class: newClass("standard"),
 			want:  nil,
 		},
 		{
 			name:  "nil sandbox",
 			sb:    nil,
 			snap:  newSnapshot("t-a", "s", "c", "i", setecv1alpha1.VMMFirecracker),
-			class: newClass("c", setecv1alpha1.VMMFirecracker),
+			class: newClass("c"),
 			want:  []ConstraintViolation{{Field: "", Message: "sandbox is nil"}},
 		},
 		{
 			name:  "nil snapshot",
-			sb:    newSandbox("t-a", "s", ""),
+			sb:    newSandbox(""),
 			snap:  nil,
-			class: newClass("c", setecv1alpha1.VMMFirecracker),
+			class: newClass("c"),
 			want:  []ConstraintViolation{{Field: "spec.snapshotRef.name", Message: "snapshot is nil"}},
 		},
 		{
 			name:  "cross-namespace rejected",
-			sb:    newSandbox("t-a", "s", ""),
+			sb:    newSandbox(""),
 			snap:  newSnapshot("t-b", "snap-1", "standard", "ghcr.io/org/app:v1", setecv1alpha1.VMMFirecracker),
-			class: newClass("standard", setecv1alpha1.VMMFirecracker),
+			class: newClass("standard"),
 			want: []ConstraintViolation{{
 				Field:   "spec.snapshotRef.name",
 				Message: `Snapshot "snap-1" is in namespace "t-b" but Sandbox is in namespace "t-a"; cross-namespace restore is not permitted`,
@@ -105,9 +105,9 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:  "class mismatch",
-			sb:    newSandbox("t-a", "s", ""),
+			sb:    newSandbox(""),
 			snap:  newSnapshot("t-a", "snap-1", "fast", "ghcr.io/org/app:v1", setecv1alpha1.VMMFirecracker),
-			class: newClass("standard", setecv1alpha1.VMMFirecracker),
+			class: newClass("standard"),
 			want: []ConstraintViolation{{
 				Field:   "spec.sandboxClassName",
 				Message: `Snapshot "snap-1" was captured under SandboxClass "fast" but the resolved class is "standard"`,
@@ -115,9 +115,9 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:  "image mismatch",
-			sb:    newSandbox("t-a", "s", "ghcr.io/org/app:v2"),
+			sb:    newSandbox("ghcr.io/org/app:v2"),
 			snap:  newSnapshot("t-a", "snap-1", "standard", "ghcr.io/org/app:v1", setecv1alpha1.VMMFirecracker),
-			class: newClass("standard", setecv1alpha1.VMMFirecracker),
+			class: newClass("standard"),
 			want: []ConstraintViolation{{
 				Field:   "spec.image",
 				Message: `Sandbox requests image "ghcr.io/org/app:v2" but Snapshot "snap-1" was captured from image "ghcr.io/org/app:v1"`,
@@ -125,9 +125,9 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:  "vmm mismatch",
-			sb:    newSandbox("t-a", "s", "ghcr.io/org/app:v1"),
+			sb:    newSandbox("ghcr.io/org/app:v1"),
 			snap:  newSnapshot("t-a", "snap-1", "standard", "ghcr.io/org/app:v1", setecv1alpha1.VMMQEMU),
-			class: newClass("standard", setecv1alpha1.VMMFirecracker),
+			class: newClass("standard"),
 			want: []ConstraintViolation{{
 				Field:   "spec.sandboxClassName",
 				Message: `Snapshot "snap-1" was captured on VMM "qemu" but the resolved class uses VMM "firecracker"`,
@@ -135,9 +135,9 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:  "multiple violations combine",
-			sb:    newSandbox("t-a", "s", "ghcr.io/org/app:v2"),
+			sb:    newSandbox("ghcr.io/org/app:v2"),
 			snap:  newSnapshot("t-b", "snap-1", "fast", "ghcr.io/org/app:v1", setecv1alpha1.VMMQEMU),
-			class: newClass("standard", setecv1alpha1.VMMFirecracker),
+			class: newClass("standard"),
 			want: []ConstraintViolation{
 				{
 					Field:   "spec.snapshotRef.name",
@@ -159,7 +159,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:  "nil class: only non-class checks run",
-			sb:    newSandbox("t-a", "s", "ghcr.io/org/app:v2"),
+			sb:    newSandbox("ghcr.io/org/app:v2"),
 			snap:  newSnapshot("t-a", "snap-1", "standard", "ghcr.io/org/app:v1", setecv1alpha1.VMMFirecracker),
 			class: nil,
 			want: []ConstraintViolation{{

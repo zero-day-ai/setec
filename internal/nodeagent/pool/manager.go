@@ -140,9 +140,9 @@ type Manager struct {
 // New returns a Manager with sensible defaults. The returned Manager
 // has no Launcher set; callers MUST set one (DefaultExecLauncher in
 // production, a fake in tests) before ReconcilePools is invoked.
-func New(storage storage.StorageBackend, cache ImagePrefetcher, ff FirecrackerFactory, nodeName string) *Manager {
+func New(storageBackend storage.StorageBackend, cache ImagePrefetcher, ff FirecrackerFactory, nodeName string) *Manager {
 	return &Manager{
-		Storage:            storage,
+		Storage:            storageBackend,
 		ImageCache:         cache,
 		FirecrackerFactory: ff,
 		NodeName:           nodeName,
@@ -228,10 +228,7 @@ func (m *Manager) ReconcilePools(ctx context.Context, classes []setecv1alpha1.Sa
 // reconcileClass drives a single class to its target pool size,
 // recycling entries older than PreWarmTTL along the way.
 func (m *Manager) reconcileClass(ctx context.Context, cls *setecv1alpha1.SandboxClass) error {
-	target := int(cls.Spec.PreWarmPoolSize)
-	if target < 0 {
-		target = 0
-	}
+	target := max(int(cls.Spec.PreWarmPoolSize), 0)
 	if target > 0 && cls.Spec.PreWarmImage == "" {
 		return fmt.Errorf("pool: class %q has PreWarmPoolSize=%d but no PreWarmImage", cls.Name, target)
 	}
@@ -285,7 +282,7 @@ func (m *Manager) bootEntries(ctx context.Context, cls *setecv1alpha1.SandboxCla
 	var wg sync.WaitGroup
 	errs := make(chan error, count)
 
-	for i := 0; i < count; i++ {
+	for range count {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
