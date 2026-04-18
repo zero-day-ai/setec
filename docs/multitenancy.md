@@ -89,8 +89,14 @@ garbage-collects the policy automatically.
 `SandboxClass` is a cluster-scoped resource administrators author once
 and tenants reference by name. A class carries:
 
-- `vmm`, `runtimeClassName`, `kernelImage`, `rootfsImage`: VMM
-  selection and image overrides.
+- `runtime.backend`, `runtime.fallback`, `runtime.params`: runtime backend
+  selection — `kata-fc`, `kata-qemu`, `gvisor`, or `runc` (dev-only) —
+  plus an optional fallback chain and backend-specific tuning. The
+  legacy `vmm` + `runtimeClassName` fields are accepted for
+  back-compat and translated by the defaulting webhook. See
+  [`crd-reference.md`](./crd-reference.md#sandboxclass) for the full schema.
+- `kernelImage`, `rootfsImage`: image overrides for kata-fc / kata-qemu
+  backends (ignored for gvisor and runc).
 - `defaultResources`, `maxResources`: per-Sandbox resource ceilings.
 - `allowedNetworkModes`: the subset of `Network.mode` values the
   class permits.
@@ -106,8 +112,8 @@ kind: SandboxClass
 metadata:
   name: standard
 spec:
-  vmm: firecracker
-  runtimeClassName: kata-fc
+  runtime:
+    backend: kata-fc
   maxResources:
     vcpu: 4
     memory: 8Gi

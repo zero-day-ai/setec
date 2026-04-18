@@ -25,8 +25,9 @@ This page is the hub. Every doc in this directory is linked below, grouped by wh
 
 ## Operations
 
-- [Prerequisites](./prerequisites.md) &mdash; host-level requirements for running Setec.
-- [Kata + Firecracker Integration](./kata-firecracker-integration.md) &mdash; how Setec talks to the runtime stack.
+- [Prerequisites](./prerequisites.md) &mdash; per-backend, per-platform host requirements.
+- [Runtime Backends](./runtime-backends/README.md) &mdash; the four backends (`kata-fc`, `kata-qemu`, `gvisor`, `runc`), isolation / CVE-surface / overhead matrix, and managed-K8s playbooks for [EKS](./runtime-backends/eks.md), [AKS](./runtime-backends/aks.md), [GKE](./runtime-backends/gke.md).
+- [Kata + Firecracker Integration](./kata-firecracker-integration.md) &mdash; deep dive on the default `kata-fc` backend's internals.
 - [Dev Smoke Test](./dev-smoke-test.md) &mdash; the scripted run maintainers perform before tagging a release.
 - [Developer Notes](./developer-notes.md) &mdash; contributor-facing naming and layout conventions.
 
